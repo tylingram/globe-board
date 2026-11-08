@@ -2112,6 +2112,9 @@ function startBoard() {
   const botStyles = {};        /* side to style name; anything missing is "balanced" */
   const styleOf = (team) => BOT_STYLES[botStyles[team]] || BOT_STYLES.balanced;
   const teamAlive = (team) => pieces.some((p) => p.team === team && !p.decoy);
+  /* A piece counts as a ball from the moment it starts rolling up, not only once the
+     curl has finished, so nothing gets a hit in during the half second it takes. */
+  const balled = (piece) => piece.curl === 1 || (piece.curlGoal === 1 && piece.curl > 0);
   const bot = { ready: false, timer: null };
   /* Firing and rolling each sit out the turn after they are used. They are separate:
      firing doesn't stop a piece rolling next turn, or the other way round. */
@@ -3787,15 +3790,15 @@ function startBoard() {
         vanish(piece);
         continue;
       }
-      const balled = piece.curl === 1;
-      if (balled) packPain(piece, shell);
-      if (balled && !piercing) {
+      const ball = balled(piece);
+      if (ball) packPain(piece, shell);
+      if (ball && !piercing) {
         turnState.blocks++;
         showDamage(piece, 0);
         if (enemyOf(piece)) awardMedal(piece);
         continue;
       }
-      const damage = balled ? band.ball : band.damage;
+      const damage = ball ? band.ball : band.damage;
       if (enemyOf(piece)) hurtEnemy = true;
       piece.hp = Math.max(0, piece.hp - damage);
       turnState.hits++;
@@ -3922,7 +3925,7 @@ function startBoard() {
       }
       /* Igloo: a ball rolls itself off the ice, and the ice can't touch it this turn. */
       if (piece.iglooTurn === turnState.number) continue;
-      if (piece.curl === 1 && perkOn(piece, "igloo") && perkReady(piece, "igloo")) {
+      if (balled(piece) && perkOn(piece, "igloo") && perkReady(piece, "igloo")) {
         rollOffIce(piece);
         continue;
       }
@@ -4479,7 +4482,7 @@ function startBoard() {
           vanish(piece);
           continue;
         }
-        if (piece.curl === 1) continue;
+        if (balled(piece)) continue;
         const enemies = piece.team !== line.owner.team;
         if (enemies && pieces.includes(line.owner) && line.medalTurn !== turnState.number) {
           line.medalTurn = turnState.number;
@@ -4695,7 +4698,7 @@ function startBoard() {
           continue;
         }
         const enemies = piece.team !== flame.shooter.team;
-        if (piece.curl === 1) {
+        if (balled(piece)) {
           showDamage(piece, 0);
           if (enemies) awardMedal(piece);
           continue;
@@ -4998,7 +5001,7 @@ function startBoard() {
   function spinWeb(spot, shell) {
     const radius = webRadius(shell.mods);
     for (const piece of pieces) {
-      if (!piece.decoy && piece.curl === 1 && mmBetween(spot, piece.up) <= radius) packPain(piece, shell);
+      if (!piece.decoy && balled(piece) && mmBetween(spot, piece.up) <= radius) packPain(piece, shell);
     }
     const web = { spot: spot.clone(), radius, age: 0, lastTurn: turnState.number + WEB_EXTRA_TURNS, caught: new Set() };
     web.mesh = new THREE.Mesh(
@@ -5047,7 +5050,7 @@ function startBoard() {
       left: MELEE_KNOCK_MM,
     };
     const enemies = attacker.team !== target.team;
-    if (target.curl === 1) {
+    if (balled(target)) {
       showDamage(target, 0);
       if (enemies && !target.decoy) awardMedal(target);
       return;
@@ -5209,7 +5212,7 @@ function startBoard() {
     const popped = new Set();
     const hits = [];
     const rolledInto = [];
-    const kickable = (kicker, ball) => crawled.has(kicker) && ball.curl === 1 && !ball.tumble && !ball.decoy && perkOn(ball, "rolling");
+    const kickable = (kicker, ball) => crawled.has(kicker) && balled(ball) && !ball.tumble && !ball.decoy && perkOn(ball, "rolling");
     pieces.forEach((a, i) => {
       for (const b of pieces.slice(i + 1)) {
         if (!crawled.has(a) && !crawled.has(b)) continue;
@@ -5321,7 +5324,7 @@ function startBoard() {
     target.shove = { axis: bounceAxis(roller, target), left: TUMBLE_KNOCK_MM };
     target.knockedTurn = turnState.number;
     const enemies = roller.team !== target.team;
-    if (target.curl === 1) {
+    if (balled(target)) {
       showDamage(target, 0);
       if (enemies) awardMedal(target);
       return;
