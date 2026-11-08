@@ -14,6 +14,8 @@ How a turn stays the same for everyone: each player sends their orders to the ho
 
 If a player leaves, their pieces stand still for the rest of the game. If the host leaves, the game ends.
 
+When a game ends, everyone sees who won and each side's kills and medals, piece by piece. The host's Play again takes everyone still there back to the room, where the host can change the settings and start another game.
+
 The Online section only appears when the page is loaded from the server (it checks `/healthz`), so the single-file version stays offline.
 
 ### Run it locally

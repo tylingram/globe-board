@@ -132,6 +132,20 @@ input[type="range"] { width: 100%; margin: 0; accent-color: var(--brass); }
 .lobby-list .empty { color: var(--ink-soft); justify-content: center; }
 .lobby-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .lobby-actions button { flex: 1; }
+.results { z-index: 6; width: min(460px, calc(100% - 32px)); }
+.results .note { margin: 0; }
+.results-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.results-table th { padding: 4px 6px; text-align: right; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-soft); border-bottom: 1.5px solid var(--rule); }
+.results-table td { padding: 5px 6px; text-align: right; font-variant-numeric: tabular-nums; }
+.results-table th:first-child, .results-table td:first-child { text-align: left; }
+.results-table tr.side td { font-weight: 600; border-top: 1px solid var(--rule); }
+.results-table tr.side:first-of-type td { border-top: none; }
+.results-table tr.winner td { background: rgba(184, 134, 11, 0.14); }
+.results-table tr.piece td { padding-top: 1px; padding-bottom: 1px; font-size: 0.8rem; color: var(--ink-soft); }
+.results-table tr.piece td:first-child { padding-left: 26px; }
+.results-table tr.piece.out td:first-child { text-decoration: line-through; }
+.results-table .dot { display: inline-block; width: 12px; height: 12px; margin-right: 8px; border-radius: 50%; vertical-align: -1px; }
+.results-table .crown { margin-left: 6px; padding: 1px 6px; font-size: 0.7rem; font-weight: 600; color: #fff; background: var(--brass); border-radius: 2px; vertical-align: 1px; }
 .online-chip { font-size: 0.8rem; color: var(--ink-soft); margin: 0; }
 .picker h2 { margin: 0; font-family: var(--font-display); font-size: 1.2rem; font-weight: 400; }
 .perks { display: flex; flex-direction: column; gap: 6px; }
@@ -420,6 +434,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
       <button type="button" id="deselect">Deselect piece</button>
       <button type="button" class="primary" id="done">I'm done with my turn</button>
       <button type="button" id="clear">Clear pieces</button>
+      <button type="button" id="showResults" hidden>Show the results</button>
     </section>
 
     <section class="group">
@@ -487,6 +502,15 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
       <h2 id="pickerTitle">Choose a perk</h2>
       <p class="note" id="pickerNote"></p>
       <div class="perks" id="pickerList"></div>
+    </div>
+    <div class="picker results" id="results" role="dialog" aria-labelledby="resultsTitle" hidden>
+      <h2 id="resultsTitle">Game over</h2>
+      <p class="note" id="resultsNote"></p>
+      <table class="results-table">
+        <thead><tr><th scope="col">Player</th><th scope="col">Kills</th><th scope="col">Medals</th><th scope="col">Left</th></tr></thead>
+        <tbody id="resultsBody"></tbody>
+      </table>
+      <div class="lobby-actions" id="resultsActions"></div>
     </div>
     <div class="scale" id="scale" aria-hidden="true"><i id="scaleLine"></i><span id="scaleText"></span></div>
   </main>
@@ -2206,6 +2230,7 @@ function startBoard() {
   const doneButton = document.getElementById("done");
   const centerOnPick = document.getElementById("centerOnPick");
   const clearButton = document.getElementById("clear");
+  const showResultsButton = document.getElementById("showResults");
   const deselectButton = document.getElementById("deselect");
   const diameterInput = document.getElementById("diameter");
   const diameterValue = document.getElementById("diameterValue");
@@ -2237,6 +2262,7 @@ function startBoard() {
     botHint.textContent = placementOver ? "Clear pieces to change" : "";
     doneButton.disabled = busy || !placementOver || gameOver || !mine.length || !!choosing || (online() && net.waiting);
     clearButton.disabled = busy || pieces.length === 0 || online();
+    showResultsButton.hidden = !gameOver;
     deselectButton.disabled = !selected;
     diameterInput.disabled = busy || !!ice.rock || online();   /* new rocks would leave the ice with no rock */
     const calmLeft = ICE_CALM_TURNS + 1 - turnState.number;
@@ -3399,8 +3425,9 @@ function startBoard() {
       const result = !standing.length ? "It's a draw: every piece is destroyed."
         : standing[0] === localTeam ? "You win: you are the last one standing."
         : `${teamName(standing[0])} wins: it is the last one standing.`;
-      say(`${result} ${online() ? "Leave the game to play another." : "Click Clear pieces to play again."}`);
+      say(result);
       if (online()) net.sendState();
+      showResults();
       return;
     }
     for (const piece of pieces) {
@@ -5613,7 +5640,114 @@ function startBoard() {
     }
   }
 
+  /* The end of the game: who won, and every side's kills and medals, piece by piece. */
+  const resultsBox = document.getElementById("results");
+  const resultsTitle = document.getElementById("resultsTitle");
+  const resultsNote = document.getElementById("resultsNote");
+  const resultsBody = document.getElementById("resultsBody");
+  const resultsActions = document.getElementById("resultsActions");
+
+  function showResults() {
+    closePicker();
+    const standing = sidesStanding();
+    const winner = standing.length === 1 ? standing[0] : null;
+    const turns = turnState.number;
+    const sideName = (team) => {
+      const seat = seatList && seatList.find((s2) => s2.team === team);
+      if (!seat) return teamName(team);
+      return team === localTeam ? `${seat.name} (you)` : seat.name;
+    };
+    const teams = seatList ? seatList.map((seat) => seat.team) : ["you", ...botTeams()];
+    const sides = teams.map((team) => {
+      const records = roster.filter((r) => r.team === team).sort((a, b) => a.slot - b.slot);
+      return {
+        team, records,
+        kills: records.reduce((sum, r) => sum + r.kills, 0),
+        medals: records.reduce((sum, r) => sum + r.medals, 0),
+        left: pieces.filter((q) => q.team === team && !q.decoy).length,
+      };
+    }).filter((side) => side.records.length);
+    sides.sort((a, b) => (b.team === winner) - (a.team === winner) || b.left - a.left || b.kills - a.kills || b.medals - a.medals);
+
+    resultsTitle.textContent = !winner ? "It's a draw" : winner === localTeam ? "You win!" : `${sideName(winner)} wins`;
+    let note = !winner ? `Every piece was destroyed by turn ${turns}.`
+      : `Last one standing after ${turns} ${turns === 1 ? "turn" : "turns"}.`;
+    resultsBody.textContent = "";
+    const cell = (row, text, tag = "td") => {
+      const td = document.createElement(tag);
+      td.textContent = text;
+      row.appendChild(td);
+      return td;
+    };
+    for (const side of sides) {
+      const row = document.createElement("tr");
+      row.className = "side" + (side.team === winner ? " winner" : "");
+      const first = document.createElement("td");
+      const dot = document.createElement("i");
+      dot.className = "dot";
+      dot.style.background = `var(--team-${side.team})`;
+      first.append(dot, sideName(side.team));
+      if (side.team === winner) {
+        const crown = document.createElement("span");
+        crown.className = "crown";
+        crown.textContent = "Winner";
+        first.appendChild(crown);
+      }
+      row.appendChild(first);
+      cell(row, side.kills);
+      cell(row, side.medals);
+      cell(row, `${side.left} of ${side.records.length}`);
+      resultsBody.appendChild(row);
+      for (const record of side.records) {
+        const standingPiece = !record.down && pieces.some((q) => q.record === record && !q.decoy);
+        const line = document.createElement("tr");
+        line.className = "piece" + (standingPiece ? "" : " out");
+        /* Bots' pieces are named "Bot 2 Biscuit"; under the side's row, "Biscuit" is enough. */
+        cell(line, (!humanTeams.has(record.team) && record.bug) || record.name || `Piece ${record.slot + 1}`);
+        cell(line, record.kills);
+        cell(line, record.medals);
+        cell(line, standingPiece ? "standing" : "out");
+        resultsBody.appendChild(line);
+      }
+    }
+
+    resultsActions.textContent = "";
+    const button = (label, onClick, primary = false) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      if (primary) b.className = "primary";
+      b.addEventListener("click", onClick);
+      resultsActions.appendChild(b);
+      return b;
+    };
+    button("Look at the board", () => { resultsBox.hidden = true; });
+    if (online()) {
+      button("Leave", () => location.reload());
+      if (net.host) {
+        button("Play again", (event) => {
+          event.target.disabled = true;
+          net.playAgain();
+        }, true);
+        note += " Play again takes everyone still here back to your room, where you can change the settings and start.";
+      } else {
+        note += ` Waiting for ${seatList[0].name} to start another game, or leave to find a new one.`;
+      }
+    } else {
+      button("Play again", () => {
+        resultsBox.hidden = true;
+        clearPieces();
+      }, true);
+    }
+    resultsNote.textContent = note;
+    resultsBox.hidden = false;
+  }
+  showResultsButton.addEventListener("click", () => {
+    if (gameOver) showResults();
+  });
+
   function clearPieces() {
+    resultsBox.hidden = true;
     roster.length = 0;
     stopTimer();
     select(null);
@@ -6010,7 +6144,9 @@ function startBoard() {
       case "room":
         net.room = message.room;
         net.host = message.room.host === net.id;
-        if (!net.inGame) showRoom();
+        /* A room only reopens mid-game when the host chose Play again. */
+        if (net.inGame && !message.room.started) backToRoom();
+        else if (!net.inGame) showRoom();
         break;
       case "left":
         playerLeft(message.id);
@@ -6094,6 +6230,26 @@ function startBoard() {
       hostStartIfPlaced();
       maybeGo();
     }
+  }
+
+  /* After a game, back to the room for another. The board goes back to how it is
+     before an online game starts; the host's Start sends out fresh seats. */
+  function backToRoom() {
+    net.inGame = false;
+    net.waiting = false;
+    net.pendingState = null;
+    seatList = null;
+    humanTeams.clear();
+    humanTeams.add("you");
+    localTeam = "you";
+    clearPieces();
+    setBotCount(Number(botInput.value));
+    document.getElementById("youDot").style.background = "var(--team-you)";
+    document.querySelectorAll(".names .dot").forEach((dot) => { dot.style.background = "var(--team-you)"; });
+    onlineChip.textContent = "Back in the room for another game.";
+    playOnlineButton.hidden = false;
+    leaveOnlineButton.hidden = true;
+    showRoom();
   }
 
   /* ----- the game, online ----- */
@@ -6291,6 +6447,7 @@ function startBoard() {
       say(!standing.length ? "It's a draw: every piece is destroyed."
         : standing[0] === localTeam ? "You win: you are the last one standing."
         : `${teamName(standing[0])} wins: it is the last one standing.`);
+      showResults();
       return;
     }
     startTimer();
@@ -6319,7 +6476,7 @@ function startBoard() {
     return net.host ? null : "Bot";
   }
 
-  Object.assign(net, { rowStatus, sendOrders, botsReady, sendPlacement, sendState, localTurnEnded, sendPick: (piece, choice) => toOthers({ t: "pick", id: piece.id, choice }) });
+  Object.assign(net, { playAgain: () => send({ t: "again" }), rowStatus, sendOrders, botsReady, sendPlacement, sendState, localTurnEnded, sendPick: (piece, choice) => toOthers({ t: "pick", id: piece.id, choice }) });
 
   /* If the host stops answering for a turn, or a player never sends orders, the turn
      goes ahead anyway 10 seconds after the turn timer would have run out. */

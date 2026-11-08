@@ -14,6 +14,7 @@ Client -> server
   {t: "join", room}                  join a room that hasn't started
   {t: "leave"}                       leave the room
   {t: "begin"}                       host: the game started, take the room off the list
+  {t: "again"}                       host: the game is over, reopen the room for another
   {t: "relay", to: "host"|"others", data}
 
 Server -> client
@@ -154,6 +155,14 @@ async def handle(cid, data):
         room = rooms.get(client["room"])
         if room and room["host"] == cid:
             room["started"] = True
+            await broadcast_lobby()
+
+    elif kind == "again":
+        rid = client["room"]
+        room = rooms.get(rid)
+        if room and room["host"] == cid and room["started"]:
+            room["started"] = False
+            await broadcast_room(rid)
             await broadcast_lobby()
 
     elif kind == "relay":
