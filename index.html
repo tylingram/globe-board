@@ -120,6 +120,19 @@ input[type="range"] { width: 100%; margin: 0; accent-color: var(--brass); }
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
 }
 .picker[hidden] { display: none; }
+.lobby { z-index: 5; width: min(420px, calc(100% - 32px)); }
+.lobby .note { margin: 0; }
+.lobby input { font: inherit; padding: 8px 10px; color: var(--ink); background: #fbf6ea; border: 1.5px solid var(--rule); border-radius: 3px; }
+.lobby input:focus { border-color: var(--brass); outline: none; }
+.lobby-list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.lobby-list li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: #fbf6ea; border: 1.5px solid var(--rule); border-radius: 3px; font-size: 0.9rem; }
+.lobby-list li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lobby-list li small { color: var(--ink-soft); }
+.lobby-list li i { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+.lobby-list .empty { color: var(--ink-soft); justify-content: center; }
+.lobby-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.lobby-actions button { flex: 1; }
+.online-chip { font-size: 0.8rem; color: var(--ink-soft); margin: 0; }
 .picker h2 { margin: 0; font-family: var(--font-display); font-size: 1.2rem; font-weight: 400; }
 .perks { display: flex; flex-direction: column; gap: 6px; }
 .names { display: flex; flex-direction: column; gap: 6px; }
@@ -345,6 +358,13 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
   <aside class="card">
     <h1>Globe Board</h1>
 
+    <section class="group" id="onlineGroup" hidden>
+      <span class="label">Online</span>
+      <p class="online-chip" id="onlineChip">Play against friends on other computers.</p>
+      <button type="button" class="primary" id="playOnline">Play online</button>
+      <button type="button" id="leaveOnline" hidden>Leave the online game</button>
+    </section>
+
     <section class="group">
       <div class="count-row">
         <label class="label" for="diameter">Sphere diameter</label>
@@ -379,7 +399,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
       </div>
       <div class="timer-bar" id="timerBar" hidden><i></i></div>
       <div class="count-row">
-        <span class="team"><i style="background: var(--team-you)"></i>You <span id="hpYou"></span></span>
+        <span class="team"><i id="youDot" style="background: var(--team-you)"></i>You <span id="hpYou"></span></span>
         <span class="tally" id="tally">0 of 3 placed</span>
       </div>
       <div id="botRows" class="group"></div>
@@ -456,6 +476,12 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
     <div class="boards" aria-label="Leaderboards">
       <section class="board"><h3>Most kills</h3><ol id="killBoard"></ol></section>
       <section class="board"><h3>Most medals</h3><ol id="medalBoard"></ol></section>
+    </div>
+    <div class="picker lobby" id="lobby" role="dialog" aria-labelledby="lobbyTitle" hidden>
+      <h2 id="lobbyTitle">Play online</h2>
+      <p class="note" id="lobbyNote"></p>
+      <div class="perks" id="lobbyBody"></div>
+      <div class="lobby-actions" id="lobbyActions"></div>
     </div>
     <div class="picker" id="picker" role="dialog" aria-labelledby="pickerTitle" hidden>
       <h2 id="pickerTitle">Choose a perk</h2>
@@ -1979,6 +2005,9 @@ function startBoard() {
     }
   })();
 
+  const SIM_STEP = 1 / 120;
+  let simClock = 0;
+
   function frame(now) {
     const seconds = Math.min(0.1, (now - lastFrame) / 1000 || 0);
     lastFrame = now;
@@ -1990,7 +2019,13 @@ function startBoard() {
       if (!piece.fireFx) continue;
       piece.fireFx.quaternion.copy(globe.quaternion).multiply(piece.mesh.quaternion).invert().multiply(camera.quaternion);
     }
-    for (let i = 0; i < playSpeed && moving; i++) stepMovers(seconds);
+    /* Moves advance in fixed steps, whatever the frame rate, so the same orders play
+       out the same way in every browser. */
+    simClock = moving ? simClock + seconds * playSpeed : 0;
+    while (moving && simClock >= SIM_STEP) {
+      stepMovers(SIM_STEP);
+      simClock -= SIM_STEP;
+    }
     if (glide) stepGlide(seconds);
     if (mushrooms.length) stepMushrooms(seconds * playSpeed);
     if (pointers.size === 0 && Math.hypot(view.spinX, view.spinY) > 0.0003) {
@@ -2011,12 +2046,45 @@ function startBoard() {
   const pieceModels = {};
   for (const team of Object.keys(TEAM_PAINT)) pieceModels[team] = buildPieceModel(TEAM_PAINT[team]);
   const pieces = [];
-  const yours = () => pieces.filter((p) => p.team === "you" && !p.decoy);
-  const bots = () => pieces.filter((p) => p.team !== "you" && !p.decoy);
+  let pieceCount = 0;           /* ids for pieces, handed out in the same order everywhere */
+  /* Online play. Offline, this browser plays the "you" side and every other side is a
+     bot. Online, each player's browser plays one seat, the host's browser runs the bots,
+     and seatList says who sits where. */
+  let localTeam = "you";
+  const humanTeams = new Set(["you"]);
+  let seatList = null;          /* online: [{ team, name, human }] in seat order */
+  let net = null;               /* online: the connection and the turn's progress */
+  const online = () => !!(net && net.inGame);
+  const yours = () => pieces.filter((p) => p.team === localTeam && !p.decoy);
+  const bots = () => pieces.filter((p) => !humanTeams.has(p.team) && !p.decoy);
   /* Every side is on its own: bots fight you and each other. */
   let botCount = 3;
-  const botTeams = () => Array.from({ length: botCount }, (_, i) => "bot" + (i + 1));
-  const teamName = (team) => (team === "you" ? "You" : "Bot " + team.slice(3));
+  const botTeams = () => (seatList ? seatList.filter((seat) => !seat.human).map((seat) => seat.team)
+    : Array.from({ length: botCount }, (_, i) => "bot" + (i + 1)));
+  /* The sides listed under yours in the panel. */
+  const rowTeams = () => (seatList ? seatList.map((seat) => seat.team).filter((team) => team !== localTeam) : botTeams());
+  const teamName = (team) => {
+    if (team === localTeam) return "You";
+    const seat = seatList && seatList.find((s2) => s2.team === team && s2.human);
+    return seat ? seat.name : team === "you" ? "You" : "Bot " + team.slice(3);
+  };
+  const possessive = (team) => (team === localTeam ? "Your" : teamName(team) + "'s");
+
+  /* Dice for anything that changes the game. Online, every browser resets them to the
+     same seed as each turn starts, so the turn plays out the same in every browser.
+     Looks-only randomness, and the bots' choices (made by the host alone), use
+     Math.random instead. */
+  let rand = Math.random;
+  function seedRand(seed) {
+    let a = seed >>> 0;
+    rand = () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
   const botStyles = {};        /* side to style name; anything missing is "balanced" */
   const styleOf = (team) => BOT_STYLES[botStyles[team]] || BOT_STYLES.balanced;
   const teamAlive = (team) => pieces.some((p) => p.team === team && !p.decoy);
@@ -2121,7 +2189,7 @@ function startBoard() {
   }
   function stepTimer(seconds) {
     if (!turnTimer.running) return;
-    const waiting = moving || youAreDone || gameOver || choosing || !placementOver || !yours().length;
+    const waiting = moving || youAreDone || gameOver || choosing || !placementOver || !yours().length || (online() && net.waiting);
     if (waiting) return drawTimer();
     turnTimer.left -= seconds;
     drawTimer();
@@ -2156,20 +2224,21 @@ function startBoard() {
       const team = row.dataset.team;
       const left = pieces.filter((p) => p.team === team && !p.decoy);
       row.querySelector("[data-hp]").textContent = placementOver ? `${totalHp(left)} HP` : "";
-      row.querySelector(".tally").textContent = !placementOver ? "Waiting for you"
+      const remote = online() && net.rowStatus(team, left);
+      row.querySelector(".tally").textContent = remote || (!placementOver ? "Waiting for you"
         : !left.length ? "Out"
         : gameOver ? "Last one standing"
         : moving ? "In action"
         : bot.ready ? "Done"
-        : "Choosing orders";
+        : "Choosing orders");
     }
     pieceNote.textContent = message;
-    botInput.disabled = placementOver;
+    botInput.disabled = placementOver || online();
     botHint.textContent = placementOver ? "Clear pieces to change" : "";
-    doneButton.disabled = busy || !placementOver || gameOver || !mine.length || !!choosing;
-    clearButton.disabled = busy || pieces.length === 0;
+    doneButton.disabled = busy || !placementOver || gameOver || !mine.length || !!choosing || (online() && net.waiting);
+    clearButton.disabled = busy || pieces.length === 0 || online();
     deselectButton.disabled = !selected;
-    diameterInput.disabled = busy || !!ice.rock;   /* new rocks would leave the ice with no rock */
+    diameterInput.disabled = busy || !!ice.rock || online();   /* new rocks would leave the ice with no rock */
     const calmLeft = ICE_CALM_TURNS + 1 - turnState.number;
     iceNote.textContent = ice.rock ? `The ice spreads ${ICE_STEP_MM} mm at the end of every turn.`
       : calmLeft === 1 ? "Ice arrives after this turn."
@@ -2288,7 +2357,7 @@ function startBoard() {
     removeMark(piece.aimMark2);
     piece.aimMark2 = null;
     const target = piece.plan || piece.fire;
-    if (target && (piece.team === "you" || moving)) {
+    if (target && (piece.team === localTeam || moving)) {
       const r = radiusMm();
       const width = markWidthMm();
       piece.arrow = new THREE.Mesh(
@@ -2321,7 +2390,7 @@ function startBoard() {
         piece.aimMark2 = perkOn(piece, "flame") ? flamePreview(piece.up, piece.fire2) : blastMark(piece.fire2, shellMods(piece));
         globe.add(piece.aimMark2);
       }
-    } else if (piece.roll && piece.team === "you") {
+    } else if (piece.roll && piece.team === localTeam) {
       const r = radiusMm();
       piece.aimMark = new THREE.Mesh(capGeometry(piece.up, (8 - markWidthMm() * 0.5) / r, 8 / r), rollPaint);
       globe.add(piece.aimMark);
@@ -2607,13 +2676,13 @@ function startBoard() {
 
   function newRecord(team) {
     const record = { team, kills: 0, medals: 0, down: false, slot: -1 };
-    if (team === "you") {
-      record.slot = roster.filter((r) => r.team === "you").length;
+    if (team === localTeam) {
+      record.slot = roster.filter((r) => r.team === localTeam).length;
       record.name = (nameInputs[record.slot] && nameInputs[record.slot].value.trim()) || `Piece ${record.slot + 1}`;
     } else {
       const used = new Set(roster.map((r) => r.bug));
       const free = BUG_NAMES.filter((n) => !used.has(n));
-      record.bug = free.length ? free[Math.floor(Math.random() * free.length)] : BUG_NAMES[roster.length % BUG_NAMES.length];
+      record.bug = free.length ? free[Math.floor(rand() * free.length)] : BUG_NAMES[roster.length % BUG_NAMES.length];
       record.name = `${teamName(team)} ${record.bug}`;
     }
     roster.push(record);
@@ -2655,7 +2724,7 @@ function startBoard() {
   const squad = document.getElementById("squad");
   let squadDrawn = "";
   function drawSquad() {
-    const mine = [0, 1, 2].map((slot) => roster.find((r) => r.team === "you" && r.slot === slot) || null);
+    const mine = [0, 1, 2].map((slot) => roster.find((r) => r.team === localTeam && r.slot === slot) || null);
     const facts = mine.map((record, slot) => {
       if (!record) return { name: (nameInputs[slot].value.trim() || `Piece ${slot + 1}`), waiting: true };
       const piece = record.piece;
@@ -2703,7 +2772,7 @@ function startBoard() {
 
   nameInputs.forEach((input, i) => input.addEventListener("input", () => {
     for (const record of roster) {
-      if (record.team === "you" && record.slot === i) record.name = input.value.trim() || `Piece ${i + 1}`;
+      if (record.team === localTeam && record.slot === i) record.name = input.value.trim() || `Piece ${i + 1}`;
     }
     drawBoards();
     if (selected) drawMedals();
@@ -2712,7 +2781,7 @@ function startBoard() {
   function addPiece(team, spot, forward) {
     const mesh = pieceModels[team].clone();
     const piece = {
-      team, up: spot, forward, mesh, plan: null, fire: null, roll: false, arrow: null, aimMark: null, move: null, shot: null,
+      id: ++pieceCount, team, up: spot, forward, mesh, plan: null, fire: null, roll: false, arrow: null, aimMark: null, move: null, shot: null,
       curl: 0, curlGoal: 0, curlParts: [],
       firedTurn: -1, rolledTurn: -1,
       hp: PIECE_HP, kick: 0,
@@ -2781,6 +2850,7 @@ function startBoard() {
   }
 
   function placePiece(spot) {
+    if (yours().length >= MAX_PIECES) return;
     if (spotTaken(spot)) {
       say("That spot is taken. Pick a spot at least 10 mm from another piece.");
       return;
@@ -2795,7 +2865,11 @@ function startBoard() {
       say("That spot is on a rock. Pick open ground.");
       return;
     }
-    addPiece("you", spot, forward);
+    addPiece(localTeam, spot, forward);
+    if (yours().length === MAX_PIECES && online()) {
+      net.sendPlacement();
+      return;
+    }
     if (yours().length === MAX_PIECES) {
       placementOver = true;
       startTimer();
@@ -2808,8 +2882,8 @@ function startBoard() {
 
   /* ---------- The bot ---------- */
   const randomDirection = () => {
-    const y = Math.random() * 2 - 1;
-    const a = Math.random() * Math.PI * 2;
+    const y = rand() * 2 - 1;
+    const a = rand() * Math.PI * 2;
     const r = Math.sqrt(1 - y * y);
     return new THREE.Vector3(r * Math.cos(a), y, r * Math.sin(a));
   };
@@ -2818,7 +2892,7 @@ function startBoard() {
      spread around the sphere, whatever its size. Bots take turns placing, there and
      back, because a side placing last would land among everyone else. */
   function placeBotPieces() {
-    ice.future = rocks[Math.floor(Math.random() * rocks.length)] || null;
+    ice.future = rocks[Math.floor(rand() * rocks.length)] || null;
     const order = [];
     for (let round = 0; round < MAX_PIECES; round++) {
       order.push(...(round % 2 ? botTeams().reverse() : botTeams()));
@@ -3134,12 +3208,14 @@ function startBoard() {
 
   function startBotThinking() {
     bot.ready = false;
+    if (online() && !net.host) return;     /* only the host's browser runs the bots */
     const [shortest, longest] = BOT_THINK_MS;
     bot.timer = setTimeout(() => {
       bot.timer = null;
       chooseBotMoves();
       bot.ready = true;
-      if (youAreDone || !yours().length) beginMoves();
+      if (online()) net.botsReady();
+      else if (youAreDone || !yours().length) beginMoves();
       else say(pieceNote.textContent);
     }, shortest + Math.random() * (longest - shortest));
   }
@@ -3270,7 +3346,7 @@ function startBoard() {
       }
     }
     const piece = pieceAt(clientX, clientY);
-    if (piece && piece.team !== "you") {
+    if (piece && piece.team !== localTeam) {
       const owned = PERKS.filter((perk) => hasPerk(piece, perk.id)).map((perk) => perk.name);
       const medalCount = `${piece.medals} ${piece.medals === 1 ? "medal" : "medals"} of valor`;
       say(`That's one of ${teamName(piece.team)}'s pieces, with ${medalCount}.${owned.length ? ` Perks: ${owned.join(", ")}.` : ""} Click one of your own.`);
@@ -3312,14 +3388,19 @@ function startBoard() {
       if (web.lastTurn < turnState.number) removeWeb(web);
     }
     while (flames.length) removeFlame(flames[0]);
+    if (online() && !net.host) {
+      net.localTurnEnded();
+      return;
+    }
     const standing = sidesStanding();
     gameOver = standing.length <= 1;
     if (gameOver) {
       turnState.number--;
       const result = !standing.length ? "It's a draw: every piece is destroyed."
-        : standing[0] === "you" ? "You win: you are the last one standing."
+        : standing[0] === localTeam ? "You win: you are the last one standing."
         : `${teamName(standing[0])} wins: it is the last one standing.`;
-      say(`${result} Click Clear pieces to play again.`);
+      say(`${result} ${online() ? "Leave the game to play another." : "Click Clear pieces to play again."}`);
+      if (online()) net.sendState();
       return;
     }
     for (const piece of pieces) {
@@ -3344,19 +3425,25 @@ function startBoard() {
     if (turnState.mushrooms) report.push(`${turnState.mushrooms} ${turnState.mushrooms === 1 ? "mushroom" : "mushrooms"} eaten`);
     const summary = report.length ? report.join(", ") + "." : "All orders done.";
     say(`${summary[0].toUpperCase()}${summary.slice(1)} ${idleMessage()}`);
+    if (online()) net.sendState();
     offerPerk();
   }
 
   /* The map goes once you and the bots are all done. */
   function endTurn() {
-    if (moving || youAreDone || !placementOver || gameOver || !yours().length || choosing) return;
+    if (moving || youAreDone || !placementOver || gameOver || !yours().length || choosing || (online() && net.waiting)) return;
     select(null);
     youAreDone = true;
+    if (online()) {
+      net.sendOrders();
+      return;
+    }
     if (bot.ready) beginMoves();
     else say("Waiting for the bots to finish choosing.");
   }
 
   function beginMoves() {
+    if (online()) seedRand((net.seed + turnState.number * 7919) >>> 0);
     youAreDone = false;
     bot.ready = false;
     turnState.bumps = turnState.hits = turnState.kills = turnState.blocks = turnState.rockStops = turnState.mushrooms = turnState.frozen = turnState.melee = 0;
@@ -3630,7 +3717,7 @@ function startBoard() {
   }
 
   function noteIfOut(team) {
-    if (!teamAlive(team)) announce(team === "you" ? "You're out: all your pieces are destroyed." : `${teamName(team)} is out.`);
+    if (!teamAlive(team)) announce(team === localTeam ? "You're out: all your pieces are destroyed." : `${teamName(team)} is out.`);
   }
 
   /* The piece flattens where it stood and leaves a splatter on the ground. */
@@ -3645,7 +3732,7 @@ function startBoard() {
     squishes.push({ mesh, scale, age: 0 });
 
     const r = radiusMm();
-    const splat = { spot: up.clone(), heading: Math.random() * Math.PI * 2, team, decoy: piece.decoy, record: piece.record };
+    const splat = { spot: up.clone(), heading: rand() * Math.PI * 2, team, decoy: piece.decoy, record: piece.record };
     splat.mesh = new THREE.Mesh(
       surfacePatch(splat.spot, SPLAT_SIZE_MM / r, splat.heading),
       new THREE.MeshLambertMaterial({ map: splatTexture(), transparent: true, depthWrite: false })
@@ -3728,7 +3815,7 @@ function startBoard() {
 
   /* Foresight marks the rock that will freeze, for you. A bot just keeps its distance. */
   function foresee(piece) {
-    if (piece.team !== "you") return;
+    if (piece.team !== localTeam) return;
     if (ice.rock || !ice.future) {
       if (ice.rock) announce("Foresight: the ice has already started.");
       return;
@@ -3746,7 +3833,7 @@ function startBoard() {
 
   function startIce() {
     if (!rocks.length) return;
-    ice.rock = ice.future || rocks[Math.floor(Math.random() * rocks.length)];
+    ice.rock = ice.future || rocks[Math.floor(rand() * rocks.length)];
     if (ice.mark) ice.mark.remove();
     ice.mark = null;
     ice.points = ice.rock.points.map((p) => ({ x: p.at.x, y: p.at.y, z: p.at.z, width: p.width }));
@@ -3887,6 +3974,7 @@ function startBoard() {
     mesh.traverse((part) => {
       if (part.isMesh && part !== mesh.children[1]) part.material = frozenBody;
     });
+    mesh.userData.frozenData = { team, up: [piece.up.x, piece.up.y, piece.up.z], forward: [piece.forward.x, piece.forward.y, piece.forward.z], curl: piece.curl };
     globe.add(mesh);
     frozen.push(mesh);
     turnState.frozen++;
@@ -3949,7 +4037,7 @@ function startBoard() {
 
   function addPuddle(spot, radius) {
     if (radius <= 0) return;
-    const puddle = { spot: spot.clone(), radius, heading: Math.random() * Math.PI * 2, frozen: false };
+    const puddle = { spot: spot.clone(), radius, heading: rand() * Math.PI * 2, frozen: false };
     puddle.mesh = puddleMesh(puddle);
     globe.add(puddle.mesh);
     puddles.push(puddle);
@@ -4644,7 +4732,7 @@ function startBoard() {
     if (!hasPerk(killer, "steel") || victim.decoy) return;
     const taken = victim.perks.filter((id) => gainPerk(killer, id));
     if (!taken.length) return;
-    const owner = killer.team === "you" ? "Your" : teamName(killer.team) + "'s";
+    const owner = possessive(killer.team);
     announce(`${owner} piece took its victim's perks: ${taken.map((id) => PERKS.find((perk) => perk.id === id).name).join(", ")}.`);
   }
 
@@ -4668,17 +4756,17 @@ function startBoard() {
       piece.record.kills++;
       drawBoards();
     }
-    if (piece.team === "you") {
+    if (humanTeams.has(piece.team)) {
       perkQueue.push({ piece, mushroom: false, reason });
       return;
     }
     const fresh = PERKS.filter((perk) => !hasPerk(piece, perk.id));
-    if (fresh.length) grantPerk(piece, fresh[Math.floor(Math.random() * fresh.length)]);
+    if (fresh.length) grantPerk(piece, fresh[Math.floor(rand() * fresh.length)]);
   }
 
   function grantPerk(piece, perk) {
     gainPerk(piece, perk.id);
-    announce(`${piece.team === "you" ? (piece.record ? piece.record.name : "Your piece") : teamName(piece.team) + "'s piece"} earned a perk: ${perk.name}.`);
+    announce(`${piece.team === localTeam ? (piece.record ? piece.record.name : "Your piece") : possessive(piece.team) + " piece"} earned a perk: ${perk.name}.`);
   }
 
   /* Adds a perk, and does what some passives do the moment they arrive. */
@@ -4709,7 +4797,7 @@ function startBoard() {
     }
     if (!heir) return;
     const passed = dead.perks.filter((id) => gainPerk(heir, id));
-    const owner = heir.team === "you" ? "Your" : teamName(heir.team) + "'s";
+    const owner = possessive(heir.team);
     const names = passed.map((id) => PERKS.find((perk) => perk.id === id).name);
     announce(names.length ? `${owner} piece took up its fallen teammate's perks: ${names.join(", ")}.` : `${owner} piece took up its fallen teammate's will.`);
   }
@@ -4719,7 +4807,7 @@ function startBoard() {
     piece.hp = PIECE_HP;
     showHealth(piece);
     if (healed) floatLabel(piece, "+" + healed, "hit heal");
-    const who = piece.team === "you" ? "Your piece" : `A ${teamName(piece.team)} piece`;
+    const who = piece.team === localTeam ? "Your piece" : `A ${teamName(piece.team)} piece`;
     announce(healed ? `${who} ate a mushroom and healed back to ${PIECE_HP} HP.` : `${who} ate a mushroom, but it was already at full health.`);
     say(pieceNote.textContent);
   }
@@ -4731,9 +4819,12 @@ function startBoard() {
     while (perkQueue.length) {
       const { piece, mushroom, reason } = perkQueue.shift();
       const fresh = PERKS.filter((perk) => !hasPerk(piece, perk.id));
-      if (!pieces.includes(piece)) continue;
+      if (!pieces.includes(piece) || piece.team !== localTeam) continue;   /* the others choose for theirs */
       if (!fresh.length) {
-        if (mushroom) healPiece(piece);
+        if (mushroom) {
+          healPiece(piece);
+          if (online()) net.sendPick(piece, "heal");
+        }
         continue;
       }
       choosing = piece;
@@ -4753,7 +4844,8 @@ function startBoard() {
         about.textContent = text;
         button.append(name, about);
         button.addEventListener("click", () => {
-          pick();
+          const choice = pick();
+          if (online()) net.sendPick(piece, choice);
           closePicker();
           offerPerk();
           say(idleMessage());
@@ -4763,12 +4855,19 @@ function startBoard() {
       };
       if (mushroom) {
         const full = piece.hp === PIECE_HP;
-        addChoice("Restore health", full ? "This piece is already at full health." : `From ${piece.hp} back to ${PIECE_HP} HP.`, () => healPiece(piece)).disabled = full;
+        addChoice("Restore health", full ? "This piece is already at full health." : `From ${piece.hp} back to ${PIECE_HP} HP.`, () => {
+          healPiece(piece);
+          return "heal";
+        }).disabled = full;
       }
       /* A mushroom gives a random perk, not a chosen one. */
       if (mushroom) {
         addChoice("Random perk", `One of the ${fresh.length} perks this piece doesn't have yet, chosen at random.`,
-          () => grantPerk(piece, fresh[Math.floor(Math.random() * fresh.length)]));
+          () => {
+            const perk = fresh[Math.floor(Math.random() * fresh.length)];
+            grantPerk(piece, perk);
+            return perk.id;
+          });
         picker.hidden = false;
         centerOn(piece);
         say(`Choose what ${who} gets from the mushroom.`);
@@ -4793,7 +4892,12 @@ function startBoard() {
         const list = document.createElement("div");
         list.className = "perk-options";
         list.hidden = true;
-        for (const perk of options) addChoice(perk.name, perk.text, () => grantPerk(piece, perk), list);
+        for (const perk of options) {
+          addChoice(perk.name, perk.text, () => {
+            grantPerk(piece, perk);
+            return perk.id;
+          }, list);
+        }
         head.addEventListener("click", () => {
           const opening = list.hidden;
           for (const other of lists) {
@@ -4837,7 +4941,7 @@ function startBoard() {
     if (decoy.curl) poseCurl(decoy);
     showHealth(decoy);
     decoy.tag.classList.toggle("perked", decoy.perks.length > 0);
-    if (piece.team === "you") {
+    if (piece.team === localTeam) {
       decoy.mesh.traverse((part) => {
         if (part.isMesh && part !== decoy.mesh.children[1]) part.material = hologramBody;
       });
@@ -4861,7 +4965,7 @@ function startBoard() {
     if (!perkOn(piece, "pain") || piece.team === shell.shooter.team) return;
     piece.painTurn = turnState.number + 1;
     floatLabel(piece, "Pain packet", "hit");
-    if (piece.team === "you") announce(`Pain packet! ${piece.record ? piece.record.name : "Your piece"} can fire two shots next turn.`);
+    if (piece.team === localTeam) announce(`Pain packet! ${piece.record ? piece.record.name : "Your piece"} can fire two shots next turn.`);
   }
 
   function spinWeb(spot, shell) {
@@ -5055,7 +5159,7 @@ function startBoard() {
     back.hp = REVIVE_HP;
     showHealth(back);
     floatLabel(back, "Risen", "hit heal");
-    announce(`${piece.team === "you" ? "Your" : teamName(piece.team) + "'s"} piece used the Dark Arts: a fallen teammate is back with ${REVIVE_HP} HP.`, spot.at);
+    announce(`${possessive(piece.team)} piece used the Dark Arts: a fallen teammate is back with ${REVIVE_HP} HP.`, spot.at);
   }
 
   function stopPiece(piece) {
@@ -5453,7 +5557,7 @@ function startBoard() {
 
   /* The chance comes first, so a turn with no room is simply a turn with no mushroom. */
   function sproutMushroom() {
-    if (Math.random() >= MUSHROOM_CHANCE) return;
+    if (rand() >= MUSHROOM_CHANCE) return;
     for (let tries = 0; tries < MUSHROOM_SPOT_TRIES; tries++) {
       const spot = randomDirection();
       if (pieces.some((p) => mmBetween(p.up, spot) <= MUSHROOM_CLEARANCE_MM)) continue;
@@ -5495,7 +5599,7 @@ function startBoard() {
       if (!closest || reachGap(closest) > 0) continue;
       dropMushroom(mushroom);
       turnState.mushrooms++;
-      if (closest.team === "you") {
+      if (humanTeams.has(closest.team)) {
         /* You choose what it gives once the turn has played out. */
         perkQueue.push({ piece: closest, mushroom: true });
         floatLabel(closest, "Mushroom!", "hit heal");
@@ -5505,7 +5609,7 @@ function startBoard() {
          counts as hurt depends on its style. */
       const fresh = PERKS.filter((perk) => !hasPerk(closest, perk.id));
       if (closest.hp <= styleOf(closest.team).healBelow || !fresh.length) healPiece(closest);
-      else grantPerk(closest, fresh[Math.floor(Math.random() * fresh.length)]);
+      else grantPerk(closest, fresh[Math.floor(rand() * fresh.length)]);
     }
   }
 
@@ -5551,7 +5655,7 @@ function startBoard() {
     botCount = count;
     botCountValue.textContent = count;
     botRows.textContent = "";
-    for (const team of botTeams()) {
+    for (const team of rowTeams()) {
       const row = document.createElement("div");
       row.className = "count-row";
       row.dataset.team = team;
@@ -5583,7 +5687,7 @@ function startBoard() {
     for (const puddle of puddles) redrawPuddle(puddle);
     /* New rocks: the rock that will freeze has to be chosen again. */
     if (ice.future && !ice.rock) {
-      ice.future = rocks[Math.floor(Math.random() * rocks.length)] || null;
+      ice.future = rocks[Math.floor(rand() * rocks.length)] || null;
       if (ice.mark && !ice.future) { ice.mark.remove(); ice.mark = null; }
     }
     /* Rocks land in new places at a new size, so a mushroom can end up under one. */
@@ -5623,8 +5727,772 @@ function startBoard() {
   clearButton.addEventListener("click", clearPieces);
   document.getElementById("reset").addEventListener("click", resetView);
 
+  /* ---------- Online play ----------
+     The page talks to the server it was loaded from. The server keeps the lobby and
+     passes messages along; the host's browser is the referee. Each turn:
+       1. every player sets orders and sends them to the host, which also picks the bots';
+       2. the host sends every order to everyone at once, and every browser plays the turn
+          from the same orders with the same dice;
+       3. the host sends the true state at the end, and every browser takes it over, so a
+          small difference between browsers never outlasts the turn. */
+  const onlineGroup = document.getElementById("onlineGroup");
+  const onlineChip = document.getElementById("onlineChip");
+  const playOnlineButton = document.getElementById("playOnline");
+  const leaveOnlineButton = document.getElementById("leaveOnline");
+  const lobby = document.getElementById("lobby");
+  const lobbyTitle = document.getElementById("lobbyTitle");
+  const lobbyNote = document.getElementById("lobbyNote");
+  const lobbyBody = document.getElementById("lobbyBody");
+  const lobbyActions = document.getElementById("lobbyActions");
+  const MAX_SIDES = 6;
+  const SEAT_TEAMS = ["you", "bot1", "bot2", "bot3", "bot4", "bot5"];
+
+  net = {
+    inGame: false, host: false, seed: 0, waiting: false,
+    ws: null, id: null, name: "", room: null, lobbyRooms: [],
+    placed: new Set(), done: new Set(), gone: new Set(),
+    placements: new Map(), orders: new Map(), teamOf: new Map(),
+    pendingState: null, turnStarted: 0, drift: [],
+  };
+
+  /* ----- packing the game into plain data, and back ----- */
+  const V = (v) => [v.x, v.y, v.z];
+  const toV = (a) => new THREE.Vector3(a[0], a[1], a[2]);
+  const packValue = (x) => (x instanceof THREE.Vector3 ? { v: V(x) } : x instanceof Set ? { set: [...x] } : Array.isArray(x) ? x.map(packValue) : x);
+  const unpackValue = (x) => (Array.isArray(x) ? x.map(unpackValue)
+    : x && typeof x === "object" ? (x.v ? toV(x.v) : x.set ? new Set(x.set) : x) : x);
+  /* What isn't game state: meshes and labels, the motion of a turn in progress, and
+     links to other things, which are sent as ids instead. */
+  const PIECE_SKIP = new Set(["mesh", "tag", "arrow", "aimMark", "aimMark2", "extraArrows", "legs", "antennae", "curlParts",
+    "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx",
+    "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy"]);
+  function packPiece(piece) {
+    const out = {};
+    for (const [key, value] of Object.entries(piece)) {
+      if (PIECE_SKIP.has(key) || typeof value === "function") continue;
+      out[key] = packValue(value);
+    }
+    out.record = roster.indexOf(piece.record);
+    out.source = piece.source ? piece.source.id : null;
+    out.burnBy = piece.burnBy && pieces.includes(piece.burnBy) ? piece.burnBy.id : null;   /* a dead shooter gets no credit */
+    return out;
+  }
+  const ORDER_KEYS = ["plan", "plan2", "decoyPlan", "fire", "fire2", "railPath"];
+  const packOrders = (piece) => {
+    const out = { roll: !!piece.roll, perksOn: [...piece.perksOn] };
+    for (const key of ORDER_KEYS) out[key] = piece[key] ? packValue(piece[key]) : null;
+    return out;
+  };
+
+  function packState(picks = []) {
+    return {
+      turn: turnState.number, gameOver, pieceCount,
+      pieces: pieces.map(packPiece),
+      roster: roster.map((r) => ({ team: r.team, kills: r.kills, medals: r.medals, down: r.down, slot: r.slot, name: r.name, bug: r.bug })),
+      splats: splats.map((sp) => ({ spot: V(sp.spot), heading: sp.heading, team: sp.team, decoy: sp.decoy, record: roster.indexOf(sp.record) })),
+      webs: webs.map((w) => ({ spot: V(w.spot), radius: w.radius, lastTurn: w.lastTurn, caught: [...w.caught].filter((q) => pieces.includes(q)).map((q) => q.id) })),
+      puddles: puddles.map((q) => ({ spot: V(q.spot), radius: q.radius, heading: q.heading, frozen: q.frozen })),
+      rails: rails.map((line) => line.points.map(V)),
+      railJoins: railJoins.map((join) => [...join]),
+      /* The wire's owner may have died; its side still decides who the wire hurts. */
+      wires: wires.map((line) => ({ points: line.points.map(V), owner: line.owner.id, ownerTeam: line.owner.team,
+        hitBy: [...line.hitBy].filter(([q]) => pieces.includes(q)).map(([q, turn]) => [q.id, turn]), medalTurn: line.medalTurn ?? null })),
+      mushrooms: mushrooms.filter((m) => !m.gone).map((m) => ({ up: V(m.up), stage: m.stage, turns: m.turns })),
+      frozen: frozen.map((mesh) => mesh.userData.frozenData).filter(Boolean),
+      ice: { rock: ice.rock ? rocks.indexOf(ice.rock) : -1, future: ice.future ? rocks.indexOf(ice.future) : -1, reach: ice.reach, goal: ice.goal, spreads: ice.spreads },
+      picks,
+    };
+  }
+
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+  /* Takes over the host's state. Pieces are matched by id and updated in place, so they
+     don't flicker. Everything else is rebuilt only if it differs from what's here. */
+  function restoreState(snap) {
+    const here = packState();
+    roster.length = 0;
+    for (const r of snap.roster) roster.push({ ...r });
+    const byId = new Map(pieces.map((q) => [q.id, q]));
+    const wanted = new Map();
+    for (const data of snap.pieces) {
+      let piece = byId.get(data.id);
+      if (piece && piece.team !== data.team) piece = null;
+      if (!piece) {
+        newRecordLater = true;
+        piece = addPiece(data.team, toV(data.up.v), toV(data.forward.v));
+        newRecordLater = false;
+        if (data.decoy && data.team === localTeam) {
+          piece.mesh.traverse((part) => {
+            if (part.isMesh && part !== piece.mesh.children[1]) part.material = hologramBody;
+          });
+        }
+      }
+      wanted.set(data.id, piece);
+    }
+    const keep = new Set(wanted.values());
+    for (const piece of [...pieces]) {
+      if (keep.has(piece)) continue;
+      piece.record = null;
+      removePiece(piece);
+    }
+    pieces.splice(0, pieces.length, ...snap.pieces.map((data) => wanted.get(data.id)));
+    for (const data of snap.pieces) {
+      const piece = wanted.get(data.id);
+      for (const [key, value] of Object.entries(data)) {
+        if (key === "record" || key === "source" || key === "burnBy") continue;
+        piece[key] = unpackValue(value);
+      }
+      piece.record = roster[data.record] || null;
+      if (piece.record && !piece.decoy) piece.record.piece = piece;
+      piece.source = data.source != null ? wanted.get(data.source) || null : null;
+      piece.burnBy = data.burnBy != null ? wanted.get(data.burnBy) || null : null;
+      piece.move = piece.shot = piece.shove = piece.tumble = piece.boom = piece.igloo = piece.ride = null;
+      poseOnSphere(piece);
+      poseCurl(piece);
+      showHealth(piece);
+      piece.tag.classList.toggle("perked", piece.perks.length > 0);
+      setOnFire(piece, piece.burnLeft > 0);
+      drawArrow(piece);
+    }
+
+    if (!same(here.splats, snap.splats)) {
+      for (const sp of splats.splice(0)) {
+        globe.remove(sp.mesh);
+        sp.mesh.geometry.dispose();
+        sp.mesh.material.map.dispose();
+        sp.mesh.material.dispose();
+      }
+      for (const data of snap.splats) {
+        const sp = { spot: toV(data.spot), heading: data.heading, team: data.team, decoy: data.decoy, record: roster[data.record] || null };
+        sp.mesh = new THREE.Mesh(surfacePatch(sp.spot, SPLAT_SIZE_MM / radiusMm(), sp.heading),
+          new THREE.MeshLambertMaterial({ map: splatTexture(), transparent: true, depthWrite: false }));
+        globe.add(sp.mesh);
+        splats.push(sp);
+      }
+    } else {
+      splats.forEach((sp, i) => { sp.record = roster[snap.splats[i].record] || null; });
+    }
+    if (!same(here.webs, snap.webs)) {
+      while (webs.length) removeWeb(webs[0]);
+      for (const data of snap.webs) {
+        const web = { spot: toV(data.spot), radius: data.radius, age: WEB_HOLD_SECONDS, lastTurn: data.lastTurn,
+          caught: new Set(data.caught.map((id) => wanted.get(id)).filter(Boolean)) };
+        web.mesh = new THREE.Mesh(surfacePatch(web.spot, (web.radius * 2) / radiusMm(), Math.random() * Math.PI * 2),
+          new THREE.MeshBasicMaterial({ map: webTexture(), transparent: true, opacity: 1, depthWrite: false }));
+        globe.add(web.mesh);
+        webs.push(web);
+      }
+    }
+    if (!same(here.puddles, snap.puddles)) {
+      clearPuddles();
+      for (const data of snap.puddles) {
+        const puddle = { spot: toV(data.spot), radius: data.radius, heading: data.heading, frozen: data.frozen };
+        puddle.mesh = puddleMesh(puddle);
+        globe.add(puddle.mesh);
+        puddles.push(puddle);
+      }
+    }
+    if (!same(here.rails, snap.rails) || !same(here.railJoins, snap.railJoins)) {
+      clearRails();
+      for (const points of snap.rails) {
+        const line = { points: points.map(toV) };
+        rails.push(line);
+        redrawRail(line);
+      }
+      railJoins.push(...snap.railJoins);
+    }
+    if (!same(here.wires, snap.wires)) {
+      clearWires();
+      for (const data of snap.wires) {
+        const line = { points: data.points.map(toV), owner: wanted.get(data.owner) || { id: data.owner, team: data.ownerTeam },
+          hitBy: new Map(data.hitBy.map(([id, turn]) => [wanted.get(id), turn]).filter(([q]) => q)) };
+        if (data.medalTurn != null) line.medalTurn = data.medalTurn;
+        wires.push(line);
+        redrawWire(line);
+      }
+    }
+    if (!same(here.mushrooms, snap.mushrooms)) {
+      while (mushrooms.length) deleteMushroom(mushrooms[0]);
+      for (const data of snap.mushrooms) {
+        addMushroom(toV(data.up));
+        const mushroom = mushrooms[mushrooms.length - 1];
+        mushroom.stage = data.stage;
+        mushroom.turns = data.turns;
+        labelMushroom(mushroom);
+      }
+    }
+    if (!same(here.frozen, snap.frozen)) {
+      for (const mesh of frozen.splice(0)) globe.remove(mesh);
+      for (const data of snap.frozen) {
+        newRecordLater = true;
+        const statue = addPiece(data.team, toV(data.up), toV(data.forward));
+        newRecordLater = false;
+        statue.curl = data.curl;
+        poseOnSphere(statue);
+        poseCurl(statue);
+        const mesh = statue.mesh;
+        removePiece(statue);
+        mesh.traverse((part) => {
+          if (part.isMesh && part !== mesh.children[1]) part.material = frozenBody;
+        });
+        mesh.userData.frozenData = data;
+        globe.add(mesh);
+        frozen.push(mesh);
+      }
+    }
+    const rock = snap.ice.rock >= 0 ? rocks[snap.ice.rock] : null;
+    if (rock !== ice.rock) {
+      ice.rock = rock;
+      ice.points = rock ? rock.points.map((q) => ({ x: q.at.x, y: q.at.y, z: q.at.z, width: q.width })) : [];
+      if (rock) for (const mesh of [groundMesh, cliffTopMesh, rockMesh]) measureIce(mesh.geometry);
+    }
+    ice.future = snap.ice.future >= 0 ? rocks[snap.ice.future] : null;
+    ice.reach = snap.ice.reach;
+    ice.goal = snap.ice.goal;
+    ice.spreads = snap.ice.spreads;
+    iceReach.value = ice.rock ? ice.reach : -1e5;
+    if (ice.rock && ice.mark) {
+      ice.mark.remove();
+      ice.mark = null;
+    }
+    pieceCount = snap.pieceCount;
+    turnState.number = snap.turn;
+    gameOver = snap.gameOver;
+    placementOver = true;
+    perkQueue.length = 0;
+    for (const pick of snap.picks || []) {
+      const piece = wanted.get(pick.id);
+      if (piece && piece.team === localTeam) perkQueue.push({ piece, mushroom: pick.mushroom, reason: pick.reason });
+    }
+    drawBoards();
+    needsDraw = true;
+  }
+
+  /* ----- talking to the server ----- */
+  const send = (message) => {
+    if (net.ws && net.ws.readyState === 1) net.ws.send(JSON.stringify(message));
+  };
+  /* To the host (straight to ourselves, if we are the host), or to everyone else. */
+  const toHost = (data) => (net.host ? onRelay({ from: net.id, data }) : send({ t: "relay", to: "host", data }));
+  const toOthers = (data) => send({ t: "relay", to: "others", data });
+
+  function connect() {
+    return new Promise((resolve, reject) => {
+      const ws = new WebSocket(location.origin.replace(/^http/, "ws") + "/ws");
+      ws.onopen = () => resolve(ws);
+      ws.onerror = () => reject(new Error("no connection"));
+      ws.onclose = () => {
+        if (net.ws !== ws) return;
+        net.ws = null;
+        showMessage("Lost the connection", "The connection to the game server dropped. Reload the page to reconnect.");
+      };
+      ws.onmessage = (event) => {
+        let message;
+        try {
+          message = JSON.parse(event.data);
+        } catch (error) {
+          return;
+        }
+        onServer(message);
+      };
+    });
+  }
+
+  function onServer(message) {
+    switch (message.t) {
+      case "welcome":
+        net.id = message.id;
+        break;
+      case "lobby":
+        net.lobbyRooms = message.rooms;
+        if (!net.room && !net.inGame && !lobby.hidden) showLobbyList();
+        break;
+      case "room":
+        net.room = message.room;
+        net.host = message.room.host === net.id;
+        if (!net.inGame) showRoom();
+        break;
+      case "left":
+        playerLeft(message.id);
+        break;
+      case "hostLeft":
+        if (net.inGame) {
+          net.inGame = false;
+          stopTimer();
+          showMessage("The host left", "The host's browser was running the game, so it can't go on. Reload the page to find another game.");
+        } else {
+          net.room = null;
+          showLobbyList("The host closed that game.");
+        }
+        break;
+      case "relay":
+        onRelay(message);
+        break;
+      case "error":
+        lobbyNote.textContent = message.msg;
+        break;
+    }
+  }
+
+  function onRelay({ from, data }) {
+    switch (data.t) {
+      case "start":
+        beginOnline(data);
+        break;
+      case "place":
+        if (!net.host) return;
+        net.placements.set(net.teamOf.get(from), data.pieces);
+        net.placed.add(net.teamOf.get(from));
+        shareProgress();
+        hostStartIfPlaced();
+        break;
+      case "orders": {
+        if (!net.host) return;
+        const team = net.teamOf.get(from);
+        if (!team || data.turn !== turnState.number) return;
+        for (const order of data.orders) {
+          const piece = pieces.find((q) => q.id === order.id);
+          if (piece && piece.team === team) net.orders.set(order.id, order);
+        }
+        net.done.add(team);
+        shareProgress();
+        maybeGo();
+        break;
+      }
+      case "go":
+        if (!net.host) applyGo(data.orders);
+        break;
+      case "state":
+        if (!net.host) onState(data.snap);
+        break;
+      case "pick":
+        applyPick(data.id, data.choice);
+        break;
+      case "progress":
+        if (net.host) return;
+        net.placed = new Set(data.placed);
+        net.done = new Set(data.done);
+        net.gone = new Set(data.gone);
+        say(pieceNote.textContent);
+        break;
+    }
+  }
+
+  function shareProgress() {
+    toOthers({ t: "progress", placed: [...net.placed], done: [...net.done], gone: [...net.gone] });
+    say(pieceNote.textContent);
+  }
+
+  function playerLeft(id) {
+    const team = net.teamOf.get(id);
+    if (!team) return;
+    net.gone.add(team);
+    const seat = seatList && seatList.find((s2) => s2.team === team);
+    if (net.inGame && seat) announce(`${seat.name} left the game. Their pieces stand still from now on.`);
+    if (net.host && net.inGame) {
+      shareProgress();
+      hostStartIfPlaced();
+      maybeGo();
+    }
+  }
+
+  /* ----- the game, online ----- */
+  function beginOnline(data) {
+    clearPieces();
+    seatList = data.seats;
+    humanTeams.clear();
+    for (const seat of seatList) if (seat.human) humanTeams.add(seat.team);
+    localTeam = seatList.find((seat) => seat.cid === net.id).team;
+    net.teamOf = new Map(seatList.filter((seat) => seat.human).map((seat) => [seat.cid, seat.team]));
+    net.inGame = true;
+    net.seed = data.seed;
+    net.placed = new Set();
+    net.done = new Set();
+    net.placements = new Map();
+    net.orders = new Map();
+    net.waiting = false;
+    net.pendingState = null;
+    diameterInput.value = data.diameter;
+    setDiameter(data.diameter);
+    rockSeed = data.rockSeed;
+    layOutRocks();
+    timerInput.value = data.timer;
+    setTimerLimit(data.timer);
+    setBotCount(botTeams().length);
+    pieceCount = 0;
+    seedRand(data.seed);
+    const paint = `var(--team-${localTeam})`;
+    document.getElementById("youDot").style.background = paint;
+    document.querySelectorAll(".names .dot").forEach((dot) => { dot.style.background = paint; });
+    onlineChip.textContent = `Online in ${seatList[0].name}'s game, with ${seatList.filter((seat) => seat.human).length} players.`;
+    playOnlineButton.hidden = true;
+    leaveOnlineButton.hidden = false;
+    lobby.hidden = true;
+    say(idleMessage());
+  }
+
+  function sendPlacement() {
+    const placed = yours().map((piece, i) => ({ up: V(piece.up), forward: V(piece.forward), name: piece.record ? piece.record.name : `Piece ${i + 1}` }));
+    toHost({ t: "place", pieces: placed });
+    say("Your pieces are placed. Waiting for the other players to place theirs.");
+  }
+
+  /* Once every player has placed, the host sets out all the pieces in seat order, adds
+     the bots, and sends everyone the starting board. */
+  function hostStartIfPlaced() {
+    if (!net.host || placementOver) return;
+    const waitingFor = seatList.filter((seat) => seat.human && !net.gone.has(seat.team) && !net.placed.has(seat.team));
+    if (waitingFor.length) return;
+    while (pieces.length) removePiece(pieces[0]);
+    roster.length = 0;
+    pieceCount = 0;
+    seedRand(net.seed ^ 0x5bd1e995);
+    for (const seat of seatList.filter((s2) => s2.human)) {
+      (net.placements.get(seat.team) || []).forEach((data, slot) => {
+        let up = toV(data.up).normalize();
+        for (let tries = 0; tries < 60 && (spotTaken(up) || rockGap({ up, forward: up, curl: 1 }) < 0); tries++) {
+          up = up.clone().applyAxisAngle(randomDirection(), 6 / radiusMm()).normalize();
+        }
+        const forward = toV(data.forward);
+        forward.addScaledVector(up, -forward.dot(up)).normalize();
+        newRecordLater = true;
+        const piece = addPiece(seat.team, up, forward);
+        newRecordLater = false;
+        piece.record = { team: seat.team, kills: 0, medals: 0, down: false, slot, name: String(data.name || `Piece ${slot + 1}`).slice(0, 16), piece };
+        roster.push(piece.record);
+      });
+    }
+    placeBotPieces();
+    placementOver = true;
+    sproutMushroom();
+    drawBoards();
+    startBotThinking();
+    sendState(true);
+    startTimer();
+    say(idleMessage());
+  }
+
+  function sendOrders() {
+    const orders = yours().map((piece) => ({ id: piece.id, ...packOrders(piece) }));
+    if (net.host) {
+      for (const order of orders) net.orders.set(order.id, order);
+      net.done.add(localTeam);
+      shareProgress();
+      say("Waiting for the other players.");
+      maybeGo();
+    } else {
+      net.done.add(localTeam);
+      toHost({ t: "orders", turn: turnState.number, orders });
+      say("Orders sent. Waiting for the other players.");
+    }
+  }
+
+  function botsReady() {
+    say(pieceNote.textContent);
+    maybeGo();
+  }
+
+  /* The host starts the turn once every player still in has sent orders and the bots
+     have chosen theirs. A player who left, or has no pieces, isn't waited for. */
+  function maybeGo(force = false) {
+    if (!net.host || !net.inGame || moving || !placementOver || gameOver) return;
+    const needed = seatList.filter((seat) => seat.human && !net.gone.has(seat.team) && teamAlive(seat.team));
+    if (!force && !needed.every((seat) => net.done.has(seat.team))) return;
+    if (bots().length && !bot.ready) return;
+    const orders = [];
+    for (const piece of pieces) {
+      if (piece.decoy) continue;
+      const order = humanTeams.has(piece.team) ? net.orders.get(piece.id) : { id: piece.id, ...packOrders(piece) };
+      if (order) orders.push(order);
+    }
+    toOthers({ t: "go", turn: turnState.number, orders });
+    applyGo(orders);
+  }
+
+  /* Everyone's orders, set on every piece, and the turn begins. */
+  function applyGo(orders) {
+    const byId = new Map(orders.map((order) => [order.id, order]));
+    select(null);
+    for (const piece of pieces) {
+      if (piece.decoy) continue;
+      const order = byId.get(piece.id);
+      for (const key of ORDER_KEYS) piece[key] = order && order[key] ? unpackValue(order[key]) : null;
+      piece.roll = !!(order && order.roll);
+      piece.perksOn = new Set(order ? order.perksOn : []);
+      drawArrow(piece);
+    }
+    net.done.clear();
+    net.orders.clear();
+    net.waiting = false;
+    beginMoves();
+  }
+
+  function sendState(first = false) {
+    const picks = perkQueue.filter((entry) => humanTeams.has(entry.piece.team) && pieces.includes(entry.piece))
+      .map((entry) => ({ id: entry.piece.id, mushroom: !!entry.mushroom, reason: entry.reason || "kill" }));
+    for (let i = perkQueue.length - 1; i >= 0; i--) {
+      if (perkQueue[i].piece.team !== localTeam) perkQueue.splice(i, 1);
+    }
+    net.done.clear();
+    net.orders.clear();
+    net.turnStarted = performance.now();
+    toOthers({ t: "state", snap: { ...packState(picks), first } });
+    say(pieceNote.textContent);
+  }
+
+  /* A guest's own playing of the turn is done. The host's result may already be here. */
+  function localTurnEnded() {
+    const snap = net.pendingState;
+    net.pendingState = null;
+    if (snap) {
+      applyState(snap);
+      return;
+    }
+    net.waiting = true;
+    say("Waiting for the host's results.");
+  }
+
+  function onState(snap) {
+    if (moving) {
+      /* Still playing the turn here: finish it at once, then take the host's result. */
+      net.pendingState = snap;
+      for (let n = 0; moving && n < 60000; n++) stepMovers(SIM_STEP);
+      if (net.pendingState) localTurnEnded();
+      return;
+    }
+    applyState(snap);
+  }
+
+  function applyState(snap) {
+    if (!snap.first) {
+      const here = new Map(pieces.map((q) => [q.id, q]));
+      let worst = 0;
+      let differ = snap.pieces.length !== pieces.length;
+      for (const data of snap.pieces) {
+        const piece = here.get(data.id);
+        if (!piece) { differ = true; continue; }
+        worst = Math.max(worst, piece.up.angleTo(toV(data.up.v)) * radiusMm());
+        if (piece.hp !== data.hp) differ = true;
+      }
+      net.drift.push({ turn: snap.turn - 1, sameOutcome: !differ, worstMm: worst });
+    }
+    if (snap.first) {
+      while (pieces.length) removePiece(pieces[0]);
+      roster.length = 0;
+    }
+    restoreState(snap);
+    net.waiting = false;
+    youAreDone = false;
+    net.done.clear();
+    closePicker();
+    if (gameOver) {
+      stopTimer();
+      const standing = sidesStanding();
+      say(!standing.length ? "It's a draw: every piece is destroyed."
+        : standing[0] === localTeam ? "You win: you are the last one standing."
+        : `${teamName(standing[0])} wins: it is the last one standing.`);
+      return;
+    }
+    startTimer();
+    say(idleMessage());
+    offerPerk();
+  }
+
+  function applyPick(id, choice) {
+    const piece = pieces.find((q) => q.id === id);
+    if (!piece) return;
+    if (choice === "heal") healPiece(piece);
+    else {
+      const perk = PERKS.find((q) => q.id === choice);
+      if (perk) grantPerk(piece, perk);
+    }
+  }
+
+  function rowStatus(team, left) {
+    if (!placementOver) {
+      if (!humanTeams.has(team)) return "Waiting";
+      return net.gone.has(team) ? "Left" : net.placed.has(team) ? "Placed" : "Placing";
+    }
+    if (net.gone.has(team)) return left.length ? "Left the game" : "Out";
+    if (!left.length || gameOver || moving) return null;
+    if (humanTeams.has(team)) return net.done.has(team) ? "Done" : "Choosing orders";
+    return net.host ? null : "Bot";
+  }
+
+  Object.assign(net, { rowStatus, sendOrders, botsReady, sendPlacement, sendState, localTurnEnded, sendPick: (piece, choice) => toOthers({ t: "pick", id: piece.id, choice }) });
+
+  /* If the host stops answering for a turn, or a player never sends orders, the turn
+     goes ahead anyway 10 seconds after the turn timer would have run out. */
+  setInterval(() => {
+    if (!online() || !net.host || moving || gameOver || !placementOver) return;
+    const hostReady = youAreDone || !yours().length;
+    if (hostReady && performance.now() - net.turnStarted > (turnTimer.limit + 10) * 1000) maybeGo(true);
+  }, 1000);
+  /* A hidden tab gets no animation frames, so a turn would stall there. Keep it going. */
+  let lastHiddenStep = performance.now();
+  setInterval(() => {
+    const now = performance.now();
+    const seconds = Math.min(1, (now - lastHiddenStep) / 1000);
+    lastHiddenStep = now;
+    if (!document.hidden || !online() || !moving) return;
+    for (let t = 0; moving && t < seconds; t += SIM_STEP) stepMovers(SIM_STEP);
+  }, 250);
+
+  /* ----- the lobby ----- */
+  function lobbyScreen(title, note) {
+    lobbyTitle.textContent = title;
+    lobbyNote.textContent = note || "";
+    lobbyBody.textContent = "";
+    lobbyActions.textContent = "";
+    lobby.hidden = false;
+  }
+  function lobbyButton(label, onClick, primary = false) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    if (primary) button.className = "primary";
+    button.addEventListener("click", onClick);
+    lobbyActions.appendChild(button);
+    return button;
+  }
+  function showMessage(title, note) {
+    lobbyScreen(title, note);
+    lobbyButton("Reload", () => location.reload(), true);
+  }
+
+  function showNameEntry() {
+    lobbyScreen("Play online", "Choose the name other players will see.");
+    const input = document.createElement("input");
+    input.maxLength = 16;
+    input.placeholder = "Your name";
+    input.setAttribute("aria-label", "Your name");
+    try {
+      input.value = localStorage.getItem("globeBoardName") || "";
+    } catch (error) { /* no storage */ }
+    lobbyBody.appendChild(input);
+    const enter = async () => {
+      const name = input.value.trim();
+      if (!name) {
+        input.focus();
+        return;
+      }
+      try { localStorage.setItem("globeBoardName", name); } catch (error) { /* fine */ }
+      net.name = name;
+      lobbyNote.textContent = "Connecting...";
+      try {
+        net.ws = await connect();
+      } catch (error) {
+        lobbyNote.textContent = "Couldn't reach the game server. It may be waking up: try again in a minute.";
+        return;
+      }
+      send({ t: "hello", name });
+      showLobbyList();
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") enter();
+    });
+    lobbyButton("Cancel", () => { lobby.hidden = true; });
+    lobbyButton("Enter the lobby", enter, true);
+    input.focus();
+  }
+
+  function showLobbyList(note) {
+    lobbyScreen("Games", note || `You're in the lobby as ${net.name}. Host a game, or join one that's waiting for players.`);
+    const list = document.createElement("ul");
+    list.className = "lobby-list";
+    const open = net.lobbyRooms.filter((room) => !room.started);
+    if (!open.length) {
+      const none = document.createElement("li");
+      none.className = "empty";
+      none.textContent = "No games waiting yet. Host one!";
+      list.appendChild(none);
+    }
+    for (const room of open) {
+      const row = document.createElement("li");
+      const words = document.createElement("span");
+      words.textContent = `${room.hostName}'s game `;
+      const count = document.createElement("small");
+      count.textContent = `${room.players} of ${MAX_SIDES} players`;
+      words.appendChild(count);
+      const join = document.createElement("button");
+      join.type = "button";
+      join.textContent = "Join";
+      join.disabled = room.players >= MAX_SIDES;
+      join.addEventListener("click", () => send({ t: "join", room: room.id }));
+      row.append(words, join);
+      list.appendChild(row);
+    }
+    lobbyBody.appendChild(list);
+    lobbyButton("Close", () => { lobby.hidden = true; });
+    lobbyButton("Host a game", () => send({ t: "host" }), true);
+  }
+
+  /* Seats: the players in the order they joined (the host first), then the bots. */
+  function plannedSeats() {
+    const players = net.room.players.slice(0, MAX_SIDES);
+    const botsWanted = net.host ? Math.min(botCount, MAX_SIDES - players.length) : 0;
+    return [
+      ...players.map((player, i) => ({ team: SEAT_TEAMS[i], name: player.name, human: true, cid: player.id })),
+      ...Array.from({ length: botsWanted }, (_, i) => ({ team: SEAT_TEAMS[players.length + i], name: `Bot ${players.length + i}`, human: false, cid: null })),
+    ];
+  }
+
+  function showRoom() {
+    const room = net.room;
+    const hostName = (room.players.find((player) => player.id === room.host) || {}).name || "?";
+    const seats = plannedSeats();
+    lobbyScreen(net.host ? "Your game" : `${hostName}'s game`, net.host
+      ? `Uses your settings from the panel: ${board.diameter} mm sphere, ${seats.filter((seat) => !seat.human).length} bots, ${clockText(turnTimer.limit)} turns. Change them there before you start.`
+      : `Waiting for ${hostName} to start the game. The host chooses the sphere, the bots and the turn timer.`);
+    const list = document.createElement("ul");
+    list.className = "lobby-list";
+    for (const seat of seats) {
+      const row = document.createElement("li");
+      const dot = document.createElement("i");
+      dot.style.background = `var(--team-${seat.team})`;
+      const words = document.createElement("span");
+      words.textContent = seat.name + (seat.cid === room.host ? " (host)" : "") + (seat.cid === net.id ? " (you)" : "");
+      row.append(dot, words);
+      list.appendChild(row);
+    }
+    lobbyBody.appendChild(list);
+    lobbyButton("Leave", () => {
+      send({ t: "leave" });
+      net.room = null;
+      net.host = false;
+      showLobbyList();
+    });
+    if (net.host) {
+      const start = lobbyButton("Start the game", () => {
+        const data = { t: "start", seats: plannedSeats(), seed: Math.floor(Math.random() * 2 ** 31), rockSeed: Math.floor(Math.random() * 1e9),
+          diameter: board.diameter, timer: turnTimer.limit };
+        send({ t: "begin" });
+        toOthers(data);
+        beginOnline(data);
+      }, true);
+      start.disabled = seats.length < 2;
+      if (seats.length < 2) lobbyNote.textContent += " You need at least one other player or bot.";
+    }
+  }
+
+  playOnlineButton.addEventListener("click", () => (net.ws ? (net.room ? showRoom() : showLobbyList()) : showNameEntry()));
+  leaveOnlineButton.addEventListener("click", () => location.reload());
+  /* While in a room, the host's own panel settings show up in the room as they change. */
+  for (const input of [diameterInput, botInput, timerInput]) {
+    input.addEventListener("input", () => {
+      if (net.room && !net.inGame && !lobby.hidden) showRoom();
+    });
+  }
+  /* Online play needs the game server. Offline (opened as a file, or as an artifact),
+     the Online section stays hidden. */
+  if (/^https?:$/.test(location.protocol)) {
+    fetch("/healthz", { cache: "no-store" }).then((response) => (response.ok ? response.text() : "")).then((text) => {
+      if (text.trim() === "globe-board") onlineGroup.hidden = false;
+    }).catch(() => {});
+  }
+
   /* Board data for the game rules that come next, and for testing. */
-  window.globeBoard = { board, pieces, shells, blasts, splats, squishes, rocks, mushrooms, webs, flames, tunnels, rails, wires, puddles, ice, frozen, iceDistance, rockGap, sphereToRock, rockDistance, view, turnState, pieceGap: (a, b) => pieceGap(a, b, radiusMm()) };
+  window.globeBoard = { board, pieces, shells, blasts, splats, squishes, rocks, mushrooms, webs, flames, tunnels, rails, wires, puddles, ice, frozen, iceDistance, rockGap, sphereToRock, rockDistance, view, turnState, pieceGap: (a, b) => pieceGap(a, b, radiusMm()), net, team: () => localTeam, isOver: () => gameOver };
   board.diameter = Number(diameterInput.value);
   groundRadius.value = board.diameter / 2;
   diameterValue.textContent = board.diameter + " mm";
