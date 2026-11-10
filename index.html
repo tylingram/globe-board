@@ -466,6 +466,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
       <label class="check"><input type="checkbox" id="centerOnPick" checked> Center the view on a piece when I pick it</label>
       <label class="check"><input type="checkbox" id="soundOn" checked> Sound effects</label>
       <label class="check"><input type="checkbox" id="devMode"> Dev mode</label>
+      <label class="check"><input type="checkbox" id="fastPlay"> 10&times; speed</label>
       <button type="button" id="devPerks" hidden>Add perks (dev)</button>
       <button type="button" id="deselect">Deselect piece</button>
       <button type="button" class="primary" id="done">I'm done with my turn</button>
@@ -2093,9 +2094,10 @@ function startBoard() {
     };
   })();
 
-  /* For testing: ?speed=10 in the address plays out turns ten times as fast. The turn
-     timer still runs at normal speed. */
-  const playSpeed = (() => {
+  /* "10x speed" in the panel (or ?speed=10 in the address) plays out turns that much
+     faster. Moves still run in the same fixed steps, so nothing changes but the wait.
+     The turn timer still runs at normal speed. */
+  let playSpeed = (() => {
     try {
       return Math.min(20, Math.max(1, Math.round(Number(new URLSearchParams(location.search).get("speed")) || 1)));
     } catch (error) {
@@ -3739,6 +3741,13 @@ function startBoard() {
     drawArrow(piece);
     say(`Dev mode: that piece now has ${piece.perks.length ? piece.perks.length + " perk" + (piece.perks.length === 1 ? "" : "s") : "no perks"}.`);
   }
+  const fastPlay = document.getElementById("fastPlay");
+  try { if (playSpeed === 1 && localStorage.getItem("globeBoardFast") === "1") playSpeed = 10; } catch (error) { /* no storage */ }
+  fastPlay.checked = playSpeed > 1;
+  fastPlay.addEventListener("change", () => {
+    playSpeed = fastPlay.checked ? 10 : 1;
+    try { localStorage.setItem("globeBoardFast", fastPlay.checked ? "1" : "0"); } catch (error) { /* no storage */ }
+  });
   devMode.addEventListener("change", () => { if (!devMode.checked) devPicker.hidden = true; say(pieceNote.textContent); });
   devPerksButton.addEventListener("click", openDevPicker);
   document.getElementById("devApply").addEventListener("click", applyDevPerks);
