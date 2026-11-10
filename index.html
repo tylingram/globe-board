@@ -719,8 +719,13 @@ const TUMBLE_KNOCK_MM = 20;
 const ICE_DAMAGE = 35;               /* per turn, for a piece touching the ice */
 const ICE_COLD_DAMAGE = 25;          /* the same, with Ice Cold */
 const HEALING_PER_TURN = 2;
+const GHOST_MM = 50;                 /* how far a Post Mortem Nen ghost drifts */
+const GHOST_SPEED_MM = 30;           /* per second */
+const GHOST_DAMAGE = 20;             /* to each enemy piece it passes through */
+const GHOST_REACH_MM = 12;           /* centre to centre: it is twice a piece's size */
+const GHOST_FADE_SECONDS = 0.4;
 const WILL_HP = 10;                  /* extra HP the closest teammate gets from a dying One for All piece */
-const EASY_MEDALS = 2;               /* medals per perk after Easy route */
+const EASY_MEDALS = 1;               /* medals per perk after Easy route */
 const PERK_TYPES = [
   { id: "move", name: "Move perks", text: "Switched on when the piece moves." },
   { id: "fire", name: "Cannon perks", text: "Switched on when the piece fires its cannon." },
@@ -742,9 +747,10 @@ const PERKS = [
   { id: "big", type: "fire", name: "Big shell", text: "A direct hit, within 5 mm, still does 50. Around it the blast rings are twice as wide but do half the damage: 25 within 10 mm, 13 within 20 mm, 5 within 35 mm. Also doubles a web." },
   { id: "icecold", type: "passive", passive: true, name: "Ice Cold", text: "The ice costs this piece 25 HP a turn instead of 35." },
   { id: "oneforall", type: "passive", passive: true, name: "One for All", text: "When a teammate dies, this piece takes any of its perks it lacks. When this piece dies, the closest teammate gets its perks and 10 HP." },
+  { id: "nen", type: "passive", passive: true, name: "Post Mortem Nen", text: "When an enemy kills this piece, its ghost rises, twice as big, and drifts 50 mm toward the piece that killed it, straight through pieces and rock. Every enemy piece it passes through takes 20 damage. Then it fades away." },
   { id: "healing", type: "passive", passive: true, name: "Healing", text: "Regains 2 HP at the end of every turn." },
   { id: "foresight", type: "passive", passive: true, name: "Foresight", text: "Shows you which rock turns to ice first. No use once the ice has started." },
-  { id: "easy", type: "passive", passive: true, name: "Easy route", text: "Resets this piece's medals of valor to 1, but from then on every 2 medals earns a perk." },
+  { id: "easy", type: "passive", passive: true, name: "Easy route", text: "Resets this piece's medals of valor to 1, but from then on every medal earns a perk." },
   { id: "recuperate", type: "ball", name: "Recuperate", text: "Switch on, then roll into a ball: restores 5 HP." },
   { id: "selfdestruct", type: "ball", name: "Self Destruct", text: "Switch on, then roll into a ball: 2 seconds later the piece explodes and dies. 50 damage within 15 mm, 40 within 25, 30 within 35, 20 within 45 mm." },
   { id: "rolling", type: "ball", cools: 2, name: "Rolling Destruction", text: "Switch on, then roll into a ball: if an enemy shell or flame hits the ball this turn, it rolls 50 mm toward the piece that fired. Anything it rolls into takes 35 damage and is knocked 20 mm. Then it needs 2 turns before it can do that again." },
@@ -1697,7 +1703,8 @@ function surfacePatch(up, angle, heading) {
   geometry.setIndex(index);
   return geometry;
 }
-const SPLAT_LIFT = 1.0007;     /* under the move and blast marks */
+const SPLAT_LIFT = 1.0007;
+const BLOCKED_MARK_MM = 13;     /* the X where a planned move runs into rock */     /* under the move and blast marks */
 
 /* ---------- Scene, camera, controls ---------- */
 function startBoard() {
@@ -2201,6 +2208,7 @@ function startBoard() {
   const rocks = [];
   let rockSeed = 1;
   const squishes = [];
+  const ghosts = [];           /* Post Mortem Nen: drift, hurt, fade, all within the turn */
   const mushrooms = [];
   const webs = [];             /* last until the end of the turn they land in */
   const flames = [];           /* last until the end of the turn they're breathed in */
@@ -2478,6 +2486,15 @@ function startBoard() {
         piece.extraArrows.push(arrow);
       };
       if (piece.plan && piece.plan2) extra(piece.plan, piece.plan2, arrowPaint[piece.team]);
+      /* An X where the move will run into rock and stop short. A digger goes through. */
+      if (piece.plan && piece.team === localTeam && !moving && !perkOn(piece, "tunnel")) {
+        const stop = rockStopOnPath(piece.up, piece.plan) || (piece.plan2 ? rockStopOnPath(piece.plan, piece.plan2) : null);
+        if (stop) {
+          const mark = blockedMark(stop);
+          globe.add(mark);
+          piece.extraArrows.push(mark);
+        }
+      }
       if (piece.decoyPlan) extra(piece.up, piece.decoyPlan, hologramPaint);
       if (piece.railPath && piece.railPath.length > 1) {
         const line = new THREE.Line(
@@ -2498,6 +2515,58 @@ function startBoard() {
       globe.add(piece.aimMark);
     }
     needsDraw = true;
+  }
+
+  /* Where a crawl from one spot to another would first run into rock and stop, the way
+     stopAtRocks stops it: the last spot before the rock, or null if it gets through. */
+  function rockStopOnPath(from, to) {
+    const r = radiusMm();
+    const total = mmBetween(from, to);
+    if (total < 0.5) return null;
+    const axis = new THREE.Vector3().crossVectors(from, to).normalize();
+    const poseAt = (mm) => {
+      const up = from.clone().applyAxisAngle(axis, mm / r).normalize();
+      return { up, forward: new THREE.Vector3().crossVectors(axis, up).normalize(), curl: 0 };
+    };
+    let last = poseAt(0);
+    let lastGap = rockGap(last);
+    for (let mm = 0.5; mm <= total + 1e-9; mm += 0.5) {
+      const pose = poseAt(Math.min(mm, total));
+      const gap = rockGap(pose);
+      if (gap < 0 && gap < lastGap) return last.up;
+      last = pose;
+      lastGap = gap;
+    }
+    return null;
+  }
+  let crossPaint = null;
+  function blockedMark(spot) {
+    if (!crossPaint) {
+      const size = 128;
+      const paper = document.createElement("canvas");
+      paper.width = paper.height = size;
+      const pen = paper.getContext("2d");
+      pen.lineCap = "round";
+      for (const [width, color] of [[34, "#1d1c17"], [22, "#ff3b2f"]]) {
+        pen.lineWidth = width;
+        pen.strokeStyle = color;
+        pen.beginPath();
+        pen.moveTo(26, 26); pen.lineTo(102, 102);
+        pen.moveTo(102, 26); pen.lineTo(26, 102);
+        pen.stroke();
+      }
+      const texture = new THREE.CanvasTexture(paper);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      crossPaint = new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false });
+    }
+    const r = radiusMm();
+    const mark = new THREE.Mesh(
+      surfacePatch(spot, BLOCKED_MARK_MM / r, Math.PI / 4),
+      crossPaint
+    );
+    mark.scale.setScalar((MARK_LIFT + 0.0004) / SPLAT_LIFT);   /* just above the arrow */
+    mark.renderOrder = 3;
+    return mark;
   }
 
   function setPlan(piece, spot) {
@@ -3917,7 +3986,7 @@ function startBoard() {
   }
 
   /* The piece flattens where it stood and leaves a splatter on the ground. */
-  function squish(piece) {
+  function squish(piece, killer = null) {
     const { mesh, up, team } = piece;
     const scale = pieceScale();
     removePiece(piece);
@@ -3935,6 +4004,77 @@ function startBoard() {
     );
     globe.add(splat.mesh);
     splats.push(splat);
+    if (killer && killer !== piece && killer.team !== team && !piece.decoy && hasPerk(piece, "nen")) raiseGhost(piece, killer);
+  }
+
+  /* ---------- Post Mortem Nen ---------- */
+  /* The ghost of a piece killed by an enemy: twice its size, see-through, drifting 50 mm
+     straight at its killer (or where the killer was), through pieces and rock alike. */
+  const ghostPaint = new THREE.MeshBasicMaterial({ color: linear("#e9f3ff"), transparent: true, opacity: 0, depthWrite: false });
+  function raiseGhost(dead, killer) {
+    let axis = new THREE.Vector3().crossVectors(dead.up, killer.up);
+    if (axis.lengthSq() < 1e-12) axis = new THREE.Vector3().crossVectors(dead.up, dead.forward);
+    axis.normalize();
+    const forward = new THREE.Vector3().crossVectors(axis, dead.up).normalize();
+    const mesh = pieceModels[dead.team].clone();
+    mesh.remove(mesh.children[1]);       /* no shadow */
+    const paint = ghostPaint.clone();
+    mesh.traverse((part) => { if (part.isMesh) part.material = paint; });
+    mesh.scale.setScalar(pieceScale() * 2);
+    globe.add(mesh);
+    const ghost = { up: dead.up.clone(), forward, axis, left: GHOST_MM, team: dead.team, owner: dead, hit: new Set(), mesh, paint, age: 0, fading: 0 };
+    ghosts.push(ghost);
+    poseGhost(ghost);
+    floatLabel(dead, "Post Mortem Nen", "hit");
+    announce(`${possessive(dead.team)} fallen piece rises as a ghost and goes after its killer.`, dead.up);
+  }
+  function poseGhost(ghost) {
+    const right = new THREE.Vector3().crossVectors(ghost.up, ghost.forward);
+    ghost.mesh.position.copy(ghost.up).multiplyScalar(1 + 2 / radiusMm());   /* floats a little */
+    ghost.mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, ghost.up, ghost.forward));
+  }
+  function removeGhost(ghost) {
+    globe.remove(ghost.mesh);
+    ghost.paint.dispose();
+    ghosts.splice(ghosts.indexOf(ghost), 1);
+  }
+  function stepGhosts(seconds) {
+    for (const ghost of [...ghosts]) {
+      ghost.age += seconds;
+      if (ghost.left > 0) {
+        const distance = Math.min(ghost.left, GHOST_SPEED_MM * seconds);
+        const angle = distance / radiusMm();
+        ghost.up.applyAxisAngle(ghost.axis, angle).normalize();
+        ghost.forward.applyAxisAngle(ghost.axis, angle);
+        ghost.forward.addScaledVector(ghost.up, -ghost.forward.dot(ghost.up)).normalize();
+        ghost.left -= distance;
+        for (const piece of [...pieces]) {
+          if (piece.team === ghost.team || ghost.hit.has(piece)) continue;
+          if (mmBetween(ghost.up, piece.up) > GHOST_REACH_MM) continue;
+          ghost.hit.add(piece);
+          if (piece.digging) continue;   /* safe underground */
+          if (piece.decoy) {
+            vanish(piece);
+            continue;
+          }
+          if (balled(piece)) {
+            showDamage(piece, 0);
+            continue;
+          }
+          floatLabel(piece, "Ghost", "hit");
+          hurt(piece, GHOST_DAMAGE, ghost.owner);
+        }
+        ghost.paint.opacity = Math.min(0.5, ghost.age / GHOST_FADE_SECONDS * 0.5);
+      } else {
+        ghost.fading += seconds;
+        ghost.paint.opacity = Math.max(0, 0.5 * (1 - ghost.fading / GHOST_FADE_SECONDS));
+        if (ghost.fading >= GHOST_FADE_SECONDS) {
+          removeGhost(ghost);
+          continue;
+        }
+      }
+      poseGhost(ghost);
+    }
   }
 
   /* Every piece near the landing spot is hurt, whichever side it is on. A kill of an
@@ -3973,7 +4113,7 @@ function startBoard() {
       showHealth(piece);
       if (piece.hp === 0) {
         turnState.kills++;
-        squish(piece);
+        squish(piece, shell.shooter);
         if (shell.shooter.team !== piece.team && pieces.includes(shell.shooter) && !shell.self) {
           awardPerk(shell.shooter);
           takeSpoils(shell.shooter, piece);
@@ -5003,7 +5143,7 @@ function startBoard() {
     showHealth(piece);
     if (piece.hp > 0) return;
     turnState.kills++;
-    squish(piece);
+    squish(piece, source);
     if (!source || source.team === piece.team) return;
     if (pieces.includes(source)) {
       awardPerk(source);
@@ -5327,7 +5467,7 @@ function startBoard() {
     showHealth(target);
     if (target.hp === 0) {
       turnState.kills++;
-      squish(target);
+      squish(target, attacker);
       if (attacker.team !== target.team) awardPerk(attacker);
     }
   }
@@ -5388,12 +5528,13 @@ function startBoard() {
     for (let i = 0; i < slices; i++) advanceMovers(seconds / slices);
     stepShots(seconds);
     stepBooms(seconds);
+    if (ghosts.length) stepGhosts(seconds);
     if (ice.rock) stepIce(seconds);
     needsDraw = true;
     if (flames.length) scorch();
     if (wires.length) snagOnWire();
     const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS);
-    if (busy || shells.length || blasts.length || squishes.length) return;
+    if (busy || shells.length || blasts.length || squishes.length || ghosts.length) return;
     /* Once everything else is done, the ice spreads, unless the game is already won. */
     if (ice.rock && !ice.spread && sidesLeft() > 1) {
       ice.spread = true;
@@ -5618,7 +5759,7 @@ function startBoard() {
     showHealth(target);
     if (target.hp === 0) {
       turnState.kills++;
-      squish(target);
+      squish(target, roller);
       if (enemies && pieces.includes(roller)) awardPerk(roller);
     }
   }
@@ -6065,6 +6206,7 @@ function startBoard() {
     closePicker();
     while (webs.length) removeWeb(webs[0]);
     while (flames.length) removeFlame(flames[0]);
+    while (ghosts.length) removeGhost(ghosts[0]);
     clearRails();
     clearWires();
     clearPuddles();
@@ -6953,7 +7095,7 @@ function startBoard() {
   }
 
   /* Board data for the game rules that come next, and for testing. */
-  window.globeBoard = { board, pieces, shells, blasts, splats, squishes, rocks, mushrooms, webs, flames, tunnels, rails, wires, puddles, ice, frozen, iceDistance, rockGap, sphereToRock, rockDistance, view, turnState, pieceGap: (a, b) => pieceGap(a, b, radiusMm()), net, team: () => localTeam, isOver: () => gameOver };
+  window.globeBoard = { board, pieces, shells, blasts, splats, squishes, ghosts, rocks, mushrooms, webs, flames, tunnels, rails, wires, puddles, ice, frozen, iceDistance, rockGap, sphereToRock, rockDistance, view, turnState, pieceGap: (a, b) => pieceGap(a, b, radiusMm()), net, team: () => localTeam, isOver: () => gameOver };
   board.diameter = Number(diameterInput.value);
   groundRadius.value = board.diameter / 2;
   diameterValue.textContent = board.diameter + " mm";
