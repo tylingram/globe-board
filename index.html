@@ -731,7 +731,7 @@ const PERKS = [
   { id: "tunnel", type: "move", passive: true, name: "Tunneling", text: "Always on: any move into rock digs through it. Sent into a rock, the piece keeps digging until it comes out the other side. Nothing can hurt it while it's underground." },
   { id: "double", type: "move", name: "Double Move", text: "Two moves this turn, at twice the speed. Can't be used two turns in a row.", cools: true },
   { id: "pierce", type: "fire", name: "Armor Piercing shell", text: "Hits only within 5 mm, but does 25 to a ball. Combines with Web and Big shell." },
-  { id: "web", type: "fire", name: "Web", text: "The shell spins a web 30 mm wide (60 mm with Big shell) that stays for three turns. Anything entering it moves 20 mm at half speed on the following turn. On its own it does 10 damage within 10 mm; with Armor Piercing or Big shell it does theirs instead." },
+  { id: "web", type: "fire", name: "Web", text: "The shell spins a web 30 mm wide (60 mm with Big shell) that stays for three turns. Anything entering it moves 20 mm at half speed on the following turn. On its own it does 50 on a direct hit, within 5 mm, and 10 within 10 mm; with Armor Piercing or Big shell it does theirs instead." },
   { id: "decoy", type: "move", name: "Decoy", text: "Send a fake copy on a second move. It lasts until next turn. With Barbed Wire or Rail Road on, it lays fake wire or track: real to everyone else, but harmless, and gone when anything touches it or next turn. Can't be used two turns in a row.", cools: true },
   { id: "railroad", type: "move", name: "Rail Road", text: "Lays track behind the piece as it moves, through its tunnels too. Any piece whose move lands on track can then ride anywhere on the joined-up railroad, at 30 mm/s, but can't stop on track inside rock. Can't be used two turns in a row.", cools: true },
   { id: "barbed", type: "move", name: "Barbed Wire", text: "Lays barbed wire behind the piece as it moves. Any enemy piece that touches it takes 10 damage, once per stretch of wire each turn; your own side can cross it safely. Can't be used two turns in a row.", cools: true },
@@ -739,7 +739,7 @@ const PERKS = [
   { id: "flame", type: "fire", name: "Flame Thrower", text: "Range drops to 75 mm. Instead of a shell, it breathes a plume of flame toward the spot: a 7\u00b0 slice reaching 75 mm. Anything that touches it takes 20 damage, then 5 more at the start of each of the next 2 turns. Replaces the other cannon perks." },
   { id: "steel", type: "fire", passive: true, name: "Steel", text: "Always on: when this piece's cannon kills an enemy piece, it takes that piece's perks as well." },
   { id: "puddle", type: "fire", name: "Puddle", text: "The shell leaves a puddle of water across its blast. When the ice reaches a puddle, the whole puddle freezes at once." },
-  { id: "big", type: "fire", name: "Big shell", text: "Every blast ring is twice as wide, but damage is halved: 25 within 10 mm, 13 within 20 mm, 5 within 40 mm. Also doubles a web." },
+  { id: "big", type: "fire", name: "Big shell", text: "A direct hit, within 5 mm, still does 50. Around it the blast rings are twice as wide but do half the damage: 25 within 10 mm, 13 within 20 mm, 5 within 35 mm. Also doubles a web." },
   { id: "icecold", type: "passive", passive: true, name: "Ice Cold", text: "The ice costs this piece 25 HP a turn instead of 35." },
   { id: "oneforall", type: "passive", passive: true, name: "One for All", text: "When a teammate dies, this piece takes any of its perks it lacks. When this piece dies, the closest teammate gets its perks and 10 HP." },
   { id: "healing", type: "passive", passive: true, name: "Healing", text: "Regains 2 HP at the end of every turn." },
@@ -753,22 +753,36 @@ const PERKS = [
   { id: "pain", type: "ball", name: "Pain packet", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell." },
 ];
 const BIG_RADIUS_MM = BLAST_RADIUS_MM * 2;
+const BIG_OUTER_TRIM_MM = 5;         /* a big shell's outermost ring is this much narrower than double */
+const DIRECT_HIT_MM = 5;             /* any shell landing this close kills a piece that isn't a ball */
+const DIRECT_HIT_DAMAGE = 50;
 const PIERCE_RADIUS_MM = 5;          /* the whole blast of an armor piercing shell */
 const PIERCE_DAMAGE = 50;            /* to anything inside it */
 const PIERCE_BALL_DAMAGE = 25;       /* to a piece rolled into a ball */
 
 /* What a shell does, from the shell perks that are on. They combine:
    Armor Piercing sets the blast to 5 mm, 50 damage, and 25 to a ball.
-   Big shell doubles every ring and halves every damage, rounded up.
+   Big shell doubles every ring and halves every damage, rounded up, and its outermost
+   ring is 5 mm narrower than double.
    Web spins a web half again as wide as a normal blast, or as a big one. On its own it
-   does 10 damage within 10 mm. With Armor Piercing or Big shell, it does theirs instead. */
+   does 10 damage within 10 mm. With Armor Piercing or Big shell, it does theirs instead.
+   Whatever the mix, a direct hit (within 5 mm) does 50 to a piece that isn't a ball. */
 function shellBands(mods) {
-  if (mods.web && !mods.pierce && !mods.big) return [{ within: WEB_BLAST_MM, damage: WEB_DAMAGE, ball: 0 }];
-  const base = mods.pierce
-    ? [{ within: PIERCE_RADIUS_MM, damage: PIERCE_DAMAGE, ball: PIERCE_BALL_DAMAGE }]
-    : BLAST_DAMAGE.map((band) => ({ ...band, ball: 0 }));
-  if (!mods.big) return base;
-  return base.map((band) => ({ within: band.within * 2, damage: Math.ceil(band.damage / 2), ball: Math.ceil(band.ball / 2) }));
+  let bands;
+  if (mods.web && !mods.pierce && !mods.big) bands = [{ within: WEB_BLAST_MM, damage: WEB_DAMAGE, ball: 0 }];
+  else {
+    bands = mods.pierce
+      ? [{ within: PIERCE_RADIUS_MM, damage: PIERCE_DAMAGE, ball: PIERCE_BALL_DAMAGE }]
+      : BLAST_DAMAGE.map((band) => ({ ...band, ball: 0 }));
+    if (mods.big) {
+      bands = bands.map((band) => ({ within: band.within * 2, damage: Math.ceil(band.damage / 2), ball: Math.ceil(band.ball / 2) }));
+      if (!mods.pierce) bands[bands.length - 1].within -= BIG_OUTER_TRIM_MM;
+    }
+  }
+  if (bands[0].within > DIRECT_HIT_MM || bands[0].damage < DIRECT_HIT_DAMAGE) {
+    bands.unshift({ within: DIRECT_HIT_MM, damage: DIRECT_HIT_DAMAGE, ball: bands[0].ball });
+  }
+  return bands;
 }
 const WEB_SCALE = 1.5;               /* a web is half again as wide as the blast it rides on */
 const webRadius = (mods) => (mods.big ? BIG_RADIUS_MM : BLAST_RADIUS_MM) * WEB_SCALE;
