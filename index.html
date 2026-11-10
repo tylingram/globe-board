@@ -749,7 +749,7 @@ const PERKS = [
   { id: "oneforall", type: "passive", passive: true, name: "One for All", text: "When a teammate dies, this piece takes any of its perks it lacks. When this piece dies, the closest teammate gets its perks and 10 HP." },
   { id: "nen", type: "passive", passive: true, name: "Post Mortem Nen", text: "When an enemy kills this piece, its ghost rises, twice as big, and drifts 50 mm toward the piece that killed it, straight through pieces and rock. Every enemy piece it passes through takes 20 damage. Then it fades away." },
   { id: "healing", type: "passive", passive: true, name: "Healing", text: "Regains 2 HP at the end of every turn." },
-  { id: "foresight", type: "passive", passive: true, name: "Foresight", text: "Shows you which rock turns to ice first. No use once the ice has started." },
+  { id: "foresight", type: "passive", passive: true, name: "Foresight", text: "Shows you which rock turns to ice first, and plants a flag, seen only by your side, near the last land the ice will reach." },
   { id: "easy", type: "passive", passive: true, name: "Easy route", text: "Resets this piece's medals of valor to 1, but from then on every medal earns a perk." },
   { id: "recuperate", type: "ball", name: "Recuperate", text: "Switch on, then roll into a ball: restores 5 HP." },
   { id: "selfdestruct", type: "ball", name: "Self Destruct", text: "Switch on, then roll into a ball: 2 seconds later the piece explodes and dies. 50 damage within 15 mm, 40 within 25, 30 within 35, 20 within 45 mm." },
@@ -2342,6 +2342,7 @@ function startBoard() {
     }
     pieceNote.textContent = message;
     botInput.disabled = placementOver || online();
+    showLastLand();
     for (const group of setupGroups) group.hidden = placementOver;   /* settings are fixed once the game starts */
     botHint.textContent = placementOver ? "Clear pieces to change" : "";
     doneButton.disabled = busy || !placementOver || gameOver || !mine.length || !!choosing || (online() && net.waiting);
@@ -3057,6 +3058,12 @@ function startBoard() {
       const spot = onStage(ice.future.up);
       ice.mark.hidden = !spot.front;
       ice.mark.style.transform = `translate(${spot.x}px, ${spot.y - 30}px)`;
+    }
+    if (ice.lastLand) {
+      const spot = onStage(ice.lastLand.spot);
+      const lift = Math.max(28, pixelsPerUnit() * pieceScale() * 1.9);
+      ice.lastLand.tag.hidden = !spot.front;
+      ice.lastLand.tag.style.transform = `translate(${spot.x}px, ${spot.y - lift}px)`;
     }
     for (const mushroom of mushrooms) {
       const spot = onStage(mushroom.up);
@@ -4150,11 +4157,94 @@ function startBoard() {
     geometry.setAttribute("aIceDist", new THREE.BufferAttribute(out, 1));
   }
 
+  /* Foresight's flag: roughly the last land the ice will reach, found by testing spots
+     all over the sphere for the one farthest, as the ice measures it, from the rock that
+     freezes. Only your side sees it, and only while one of your pieces has Foresight. */
+  function lastLandSpot(rock) {
+    const r = radiusMm();
+    const count = 3000;
+    let best = null;
+    let bestDistance = -Infinity;
+    for (let i = 0; i < count; i++) {
+      const y = 1 - (2 * (i + 0.5)) / count;
+      const ring = Math.sqrt(1 - y * y);
+      const turn = i * Math.PI * (3 - Math.sqrt(5));
+      const spot = new THREE.Vector3(Math.cos(turn) * ring, y, Math.sin(turn) * ring);
+      if (rockGap({ up: spot, forward: tangentPair(spot)[0], curl: 1 }) < PIECE_LENGTH_MM) continue;
+      let least = Infinity;
+      for (const point of rock.points) {
+        const distance = Math.acos(Math.min(1, point.at.dot(spot))) * r - point.width;
+        if (distance < least) least = distance;
+      }
+      if (least > bestDistance) { bestDistance = least; best = spot; }
+    }
+    return best;
+  }
+  function makeFlag() {
+    const flag = new THREE.Group();
+    const pole = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.45, 0.45, 16, 8),
+      new THREE.MeshStandardMaterial({ color: linear("#3a3127"), roughness: 0.7 })
+    );
+    pole.position.y = 8;
+    const cloth = new THREE.Shape();
+    cloth.moveTo(0, 0);
+    cloth.lineTo(11, -3.5);
+    cloth.lineTo(0, -7);
+    cloth.closePath();
+    const banner = new THREE.Mesh(
+      new THREE.ShapeGeometry(cloth),
+      new THREE.MeshBasicMaterial({ color: linear("#46b6e8"), side: THREE.DoubleSide })
+    );
+    banner.position.set(0.4, 16, 0);
+    /* leaning, with the cloth turned toward the viewer, so it reads from above too */
+    const mast = new THREE.Group();
+    mast.add(pole, banner);
+    mast.rotation.set(0.55, 0, -0.35);
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(4, 5.6, 32),
+      new THREE.MeshBasicMaterial({ color: linear("#46b6e8"), side: THREE.DoubleSide, transparent: true, opacity: 0.9, depthWrite: false })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.5;
+    flag.add(mast, ring);
+    return flag;
+  }
+  function showLastLand() {
+    const rock = ice.rock || ice.future;
+    const want = !!rock && pieces.some((p) => p.team === localTeam && !p.decoy && hasPerk(p, "foresight"));
+    const key = want ? rocks.indexOf(rock) + "@" + radiusMm() : null;
+    if (ice.lastLand && ice.lastLand.key === key) return;
+    if (ice.lastLand) {
+      globe.remove(ice.lastLand.flag);
+      ice.lastLand.flag.traverse((part) => { if (part.isMesh) { part.geometry.dispose(); part.material.dispose(); } });
+      ice.lastLand.tag.remove();
+      ice.lastLand = null;
+      needsDraw = true;
+    }
+    if (!want) return;
+    const spot = lastLandSpot(rock);
+    if (!spot) return;
+    const flag = makeFlag();
+    flag.position.copy(spot);
+    flag.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), spot);
+    flag.scale.setScalar(1 / radiusMm());
+    globe.add(flag);
+    const tag = document.createElement("div");
+    tag.className = "shroom open";
+    tag.style.background = "#2b6e8f";
+    tag.textContent = "Last land to freeze (about)";
+    marks.appendChild(tag);
+    ice.lastLand = { key, spot, flag, tag };
+    needsDraw = true;
+  }
+
   /* Foresight marks the rock that will freeze, for you. A bot just keeps its distance. */
   function foresee(piece) {
     if (piece.team !== localTeam) return;
+    showLastLand();
     if (ice.rock || !ice.future) {
-      if (ice.rock) announce("Foresight: the ice has already started.");
+      if (ice.rock) announce("Foresight: the ice has already started. A flag marks about where the last land to freeze is.", ice.lastLand && ice.lastLand.spot);
       return;
     }
     if (!ice.mark) {
@@ -4164,7 +4254,7 @@ function startBoard() {
       ice.mark.textContent = `Turns to ice after turn ${ICE_CALM_TURNS}`;
       marks.appendChild(ice.mark);
     }
-    announce(`Foresight: this rock turns to ice after turn ${ICE_CALM_TURNS}.`, ice.future.up);
+    announce(`Foresight: this rock turns to ice after turn ${ICE_CALM_TURNS}. A flag marks about where the last land to freeze is.`, ice.future.up);
     needsDraw = true;
   }
 
@@ -4415,6 +4505,7 @@ function startBoard() {
   function clearIce() {
     ice.rock = null;
     ice.future = null;
+    showLastLand();
     if (ice.mark) ice.mark.remove();
     ice.mark = null;
     ice.points = [];
