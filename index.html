@@ -453,7 +453,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
 
     <section class="group">
       <span class="label">The ice</span>
-      <p class="note">After turn 7 a random rock turns to ice. Every turn after that the ice spreads 25 mm, and any piece it reaches, or that moves onto it, freezes and dies. The pale band shows where it will reach next. In the end it covers the whole sphere.</p>
+      <p class="note">After turn 7 a random rock turns to ice. Every turn after that the ice spreads 25 mm. Any piece it reaches, or that moves onto it, takes 40 damage, once a turn, and freezes if that leaves it at 0. The pale band shows where it will reach next. In the end it covers the whole sphere.</p>
     </section>
 
     <section class="group">
@@ -707,9 +707,10 @@ const TUMBLE_MM = 50;                /* how far a kicked ball rolls */
 const TUMBLE_SPEED_MM = 20;          /* per second */
 const TUMBLE_DAMAGE = 35;
 const TUMBLE_KNOCK_MM = 20;
-const ICE_COLD_DAMAGE = 40;          /* per turn, for a piece with Ice Cold touching the ice */
+const ICE_DAMAGE = 40;               /* per turn, for a piece touching the ice */
+const ICE_COLD_DAMAGE = 25;          /* the same, with Ice Cold */
 const HEALING_PER_TURN = 2;
-const WILL_HP = 10;                  /* extra HP an heir gets from Inherited Will */
+const WILL_HP = 10;                  /* extra HP the closest teammate gets from a dying One for All piece */
 const EASY_MEDALS = 2;               /* medals per perk after Easy route */
 const PERK_TYPES = [
   { id: "move", name: "Move perks", text: "Switched on when the piece moves." },
@@ -721,7 +722,7 @@ const PERKS = [
   { id: "tunnel", type: "move", passive: true, name: "Tunneling", text: "Always on: any move into rock digs through it. Sent into a rock, the piece keeps digging until it comes out the other side. Nothing can hurt it while it's underground." },
   { id: "double", type: "move", name: "Double Move", text: "Two moves this turn, at twice the speed. Can't be used two turns in a row.", cools: true },
   { id: "pierce", type: "fire", name: "Armor Piercing shell", text: "Hits only within 5 mm, but does 25 to a ball. Combines with Web and Big shell." },
-  { id: "web", type: "fire", name: "Web", text: "The shell spins a web that stays for two turns. Anything entering it moves 20 mm at half speed on the following turn. On its own it does 10 damage within 10 mm; with Armor Piercing or Big shell it does theirs instead." },
+  { id: "web", type: "fire", name: "Web", text: "The shell spins a web 30 mm wide (60 mm with Big shell) that stays for three turns. Anything entering it moves 20 mm at half speed on the following turn. On its own it does 10 damage within 10 mm; with Armor Piercing or Big shell it does theirs instead." },
   { id: "decoy", type: "move", name: "Decoy", text: "Send a fake copy on a second move. It lasts until next turn. With Barbed Wire or Rail Road on, it lays fake wire or track: real to everyone else, but harmless, and gone when anything touches it or next turn. Can't be used two turns in a row.", cools: true },
   { id: "railroad", type: "move", name: "Rail Road", text: "Lays track behind the piece as it moves, through its tunnels too. Any piece whose move lands on track can then ride anywhere on the joined-up railroad, at 30 mm/s, but can't stop on track inside rock. Can't be used two turns in a row.", cools: true },
   { id: "barbed", type: "move", name: "Barbed Wire", text: "Lays barbed wire behind the piece as it moves. Any enemy piece that touches it takes 20 damage, once per stretch of wire each turn; your own side can cross it safely. Can't be used two turns in a row.", cools: true },
@@ -730,15 +731,14 @@ const PERKS = [
   { id: "steel", type: "fire", passive: true, name: "Steel", text: "Always on: when this piece's cannon kills an enemy piece, it takes that piece's perks as well." },
   { id: "puddle", type: "fire", name: "Puddle", text: "The shell leaves a puddle of water across its blast. When the ice reaches a puddle, the whole puddle freezes at once." },
   { id: "big", type: "fire", name: "Big shell", text: "Every blast ring is twice as wide, but damage is halved: 25 within 10 mm, 13 within 20 mm, 5 within 40 mm. Also doubles a web." },
-  { id: "icecold", type: "passive", passive: true, name: "Ice Cold", text: "The ice doesn't freeze this piece outright. Touching it costs 40 HP, once per turn, and it only freezes at 0." },
-  { id: "oneforall", type: "passive", passive: true, name: "One for All", text: "When a teammate dies, any perks it had that this piece lacks pass to this piece." },
+  { id: "icecold", type: "passive", passive: true, name: "Ice Cold", text: "The ice costs this piece 25 HP a turn instead of 40." },
+  { id: "oneforall", type: "passive", passive: true, name: "One for All", text: "When a teammate dies, this piece takes any of its perks it lacks. When this piece dies, the closest teammate gets its perks and 10 HP." },
   { id: "healing", type: "passive", passive: true, name: "Healing", text: "Regains 2 HP at the end of every turn." },
   { id: "foresight", type: "passive", passive: true, name: "Foresight", text: "Shows you which rock turns to ice first. No use once the ice has started." },
-  { id: "will", type: "passive", passive: true, name: "Inherited Will", text: "When this piece dies, the closest teammate gets its perks and 10 HP." },
   { id: "easy", type: "passive", passive: true, name: "Easy route", text: "Resets this piece's medals of valor to 1, but from then on every 2 medals earns a perk." },
   { id: "recuperate", type: "ball", name: "Recuperate", text: "Switch on, then roll into a ball: restores 5 HP." },
   { id: "selfdestruct", type: "ball", name: "Self Destruct", text: "Switch on, then roll into a ball: 2 seconds later the piece explodes and dies. 50 damage within 15 mm, 40 within 25, 30 within 35, 20 within 45 mm." },
-  { id: "rolling", type: "ball", name: "Rolling Destruction", text: "Switch on, then roll into a ball: a piece running into the ball this turn kicks it 50 mm. Anything it rolls into takes 35 damage and is knocked 20 mm." },
+  { id: "rolling", type: "ball", name: "Rolling Destruction", text: "Always on: when an enemy attack hurts this piece, it rolls up and rolls 50 mm toward that enemy. Switched on and rolled into a ball, a piece running into it kicks it 50 mm too. Anything the ball rolls into takes 35 damage and is knocked 20 mm." },
   { id: "igloo", type: "ball", cools: 2, name: "Igloo", text: "Switch on, then roll into a ball: if the ice catches it this turn, the ball rolls itself off the ice, unharmed. Then it needs 2 turns before it can do that again." },
   { id: "darkarts", type: "ball", cools: 2, name: "Dark Arts", text: "Switch on, then roll up on a fallen teammate's blood splatter to bring that piece back at 25 HP, with no perks. Then it needs 2 turns before it can do that again." },
   { id: "pain", type: "ball", name: "Pain packet", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell." },
@@ -751,8 +751,8 @@ const PIERCE_BALL_DAMAGE = 25;       /* to a piece rolled into a ball */
 /* What a shell does, from the shell perks that are on. They combine:
    Armor Piercing sets the blast to 5 mm, 50 damage, and 25 to a ball.
    Big shell doubles every ring and halves every damage, rounded up.
-   Web spins a web as wide as a normal blast, or as a big one. On its own it does no
-   damage. With Armor Piercing or Big shell, it does theirs as well. */
+   Web spins a web half again as wide as a normal blast, or as a big one. On its own it
+   does 10 damage within 10 mm. With Armor Piercing or Big shell, it does theirs instead. */
 function shellBands(mods) {
   if (mods.web && !mods.pierce && !mods.big) return [{ within: WEB_BLAST_MM, damage: WEB_DAMAGE, ball: 0 }];
   const base = mods.pierce
@@ -761,11 +761,12 @@ function shellBands(mods) {
   if (!mods.big) return base;
   return base.map((band) => ({ within: band.within * 2, damage: Math.ceil(band.damage / 2), ball: Math.ceil(band.ball / 2) }));
 }
-const webRadius = (mods) => (mods.big ? BIG_RADIUS_MM : BLAST_RADIUS_MM);
+const WEB_SCALE = 1.5;               /* a web is half again as wide as the blast it rides on */
+const webRadius = (mods) => (mods.big ? BIG_RADIUS_MM : BLAST_RADIUS_MM) * WEB_SCALE;
 const WEB_DAMAGE = 10;               /* a web shell on its own, within WEB_BLAST_MM */
 const WEB_BLAST_MM = 10;
 const WEB_MOVE_MM = 20;              /* move circle for a piece caught in a web */
-const WEB_EXTRA_TURNS = 1;           /* turns a web stays after the one it lands in */
+const WEB_EXTRA_TURNS = 2;           /* turns a web stays after the one it lands in */
 const MELEE_DAMAGE = 15;
 const MELEE_KNOCK_MM = 10;
 const MELEE_KNOCK_SPEED_MM = 60;     /* per second */
@@ -3855,6 +3856,7 @@ function startBoard() {
       turnState.hits++;
       showDamage(piece, damage);
       showHealth(piece);
+      if (damage > 0 && !shell.self) strikeBack(piece, shell.shooter);
       if (piece.hp === 0) {
         turnState.kills++;
         squish(piece);
@@ -3980,17 +3982,17 @@ function startBoard() {
         rollOffIce(piece);
         continue;
       }
-      /* Ice Cold pays 40 HP the first time each turn it touches the ice, and only
-         freezes if that leaves it at 0. */
-      if (hasPerk(piece, "icecold")) {
-        if (piece.iceTurn === turnState.number) continue;
-        piece.iceTurn = turnState.number;
-        if (piece.hp > ICE_COLD_DAMAGE) {
-          piece.hp -= ICE_COLD_DAMAGE;
-          showHealth(piece);
-          showDamage(piece, ICE_COLD_DAMAGE);
-          continue;
-        }
+      /* The ice costs 40 HP (25 with Ice Cold) the first time each turn a piece touches
+         it, and freezes it only if that leaves it at 0. */
+      if (piece.iceTurn === turnState.number) continue;
+      piece.iceTurn = turnState.number;
+      const bite = hasPerk(piece, "icecold") ? ICE_COLD_DAMAGE : ICE_DAMAGE;
+      if (piece.hp > bite) {
+        piece.hp -= bite;
+        turnState.hits++;
+        showHealth(piece);
+        showDamage(piece, bite);
+        continue;
       }
       freeze(piece);
     }
@@ -4626,6 +4628,7 @@ function startBoard() {
         }
         floatLabel(piece, "Barbed wire", "hit");
         hurt(piece, WIRE_DAMAGE, line.owner);
+        strikeBack(piece, line.owner);
       }
     }
   }
@@ -4848,6 +4851,7 @@ function startBoard() {
           awardMedal(flame.shooter);
         }
         hurt(piece, FLAME_DAMAGE, flame.shooter, true);
+        strikeBack(piece, flame.shooter);
       }
     }
     needsDraw = true;
@@ -4954,15 +4958,15 @@ function startBoard() {
     return true;
   }
 
-  /* One for All and Inherited Will: a dead piece's perks are passed on. Inherited Will
-     gives them to the closest teammate, with 10 HP. Every teammate with One for All takes
+  /* One for All: a dead piece's perks are passed on. A dying One for All piece gives
+     them to the closest teammate, with 10 HP, and every teammate with One for All takes
      them too. Perks an heir already has are lost to it. */
   function handDown(dead) {
     if (dead.decoy) return;
     const mates = pieces.filter((p) => p.team === dead.team && !p.decoy);
     if (!mates.length) return;
     const heirs = [];
-    if (hasPerk(dead, "will")) {
+    if (hasPerk(dead, "oneforall")) {
       const heir = mates.reduce((a, b) => (a.up.angleTo(dead.up) <= b.up.angleTo(dead.up) ? a : b));
       heir.hp = Math.min(PIECE_HP, heir.hp + WILL_HP);
       showHealth(heir);
@@ -4976,7 +4980,7 @@ function startBoard() {
       const passed = dead.perks.filter((id) => gainPerk(heir, id));
       const owner = possessive(heir.team);
       const names = passed.map((id) => PERKS.find((perk) => perk.id === id).name);
-      if (names.length || hasPerk(dead, "will")) announce(names.length ? `${owner} piece took up its fallen teammate's perks: ${names.join(", ")}.` : `${owner} piece took up its fallen teammate's will.`);
+      if (names.length || hasPerk(dead, "oneforall")) announce(names.length ? `${owner} piece took up its fallen teammate's perks: ${names.join(", ")}.` : `${owner} piece took up its fallen teammate's will.`);
     }
   }
 
@@ -5208,6 +5212,7 @@ function startBoard() {
     turnState.hits++;
     showDamage(target, MELEE_DAMAGE);
     showHealth(target);
+    strikeBack(target, attacker);
     if (target.hp === 0) {
       turnState.kills++;
       squish(target);
@@ -5275,7 +5280,7 @@ function startBoard() {
     needsDraw = true;
     if (flames.length) scorch();
     if (wires.length) snagOnWire();
-    const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.boom || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS);
+    const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS);
     if (busy || shells.length || blasts.length || squishes.length) return;
     /* Once everything else is done, the ice spreads, unless the game is already won. */
     if (ice.rock && !ice.spread && sidesLeft() > 1) {
@@ -5460,6 +5465,29 @@ function startBoard() {
     poseOnSphere(piece);
   }
 
+  /* Rolling Destruction: hurt by an enemy, the piece rolls up and rolls 50 mm straight
+     at it, once a turn. A piece still waiting to fire gets its shot off first. */
+  function strikeBack(piece, attacker) {
+    if (!attacker || attacker === piece || attacker.team === piece.team) return;
+    if (!hasPerk(piece, "rolling") || piece.decoy || piece.digging || piece.hp <= 0) return;
+    if (!pieces.includes(piece) || !pieces.includes(attacker) || piece.tumble) return;
+    if (piece.strikeTurn === turnState.number) return;
+    piece.strikeTurn = turnState.number;
+    piece.strikeAt = attacker;
+    if (!piece.shot) rollAt(piece);
+  }
+  function rollAt(piece) {
+    const attacker = piece.strikeAt;
+    piece.strikeAt = null;
+    if (!pieces.includes(piece) || !pieces.includes(attacker) || piece.digging || piece.tumble) return;
+    const axis = new THREE.Vector3().crossVectors(piece.up, attacker.up);
+    if (axis.lengthSq() < 1e-12) return;
+    stopPiece(piece);
+    piece.curlGoal = 1;
+    piece.tumble = { axis: axis.normalize(), left: TUMBLE_MM, hit: new Set() };
+    floatLabel(piece, "Rolling Destruction", "hit");
+  }
+
   /* What a rolling ball does to a piece it runs into. A ball it hits takes no damage
      but still flies. Damaging an enemy earns the roller a medal, as a shell would. */
   function tumbleHit(roller, target) {
@@ -5483,6 +5511,7 @@ function startBoard() {
     turnState.hits++;
     showDamage(target, TUMBLE_DAMAGE);
     showHealth(target);
+    strikeBack(target, roller);
     if (target.hp === 0) {
       turnState.kills++;
       squish(target);
@@ -5533,7 +5562,7 @@ function startBoard() {
         continue;
       }
       const gap = rockGap(piece);
-      if (perkOn(piece, "tunnel") && !piece.shove) {   /* digging is for moves, not for being knocked */
+      if (perkOn(piece, "tunnel") && !piece.shove && !piece.tumble) {   /* digging is for moves, not for being knocked or rolling */
         const inside = gap < 0;
         if (inside !== piece.digging) digTunnelMouth(piece, inside);
         if (inside && !piece.digging) piece.digStart = piece.lastClear || piece.moveStart || before.get(piece);
@@ -5552,6 +5581,7 @@ function startBoard() {
   function advanceMovers(seconds) {
     const before = new Map(pieces.map((p) => [p, { up: p.up.clone(), forward: p.forward.clone(), curl: p.curl }]));
     const crawled = new Set();
+    for (const piece of [...pieces]) if (piece.strikeAt && !piece.shot) rollAt(piece);
 
     for (const piece of pieces) {
       if (piece.shove) {
@@ -6059,7 +6089,7 @@ function startBoard() {
      links to other things, which are sent as ids instead. */
   const PIECE_SKIP = new Set(["mesh", "tag", "arrow", "aimMark", "aimMark2", "extraArrows", "legs", "antennae", "curlParts",
     "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx",
-    "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy"]);
+    "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt"]);
   function packPiece(piece) {
     const out = {};
     for (const [key, value] of Object.entries(piece)) {
