@@ -58,6 +58,7 @@ h1 {
 }
 .group { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; border: 0; min-width: 0; }
 .group + .group { border-top: 1px solid var(--rule); padding-top: 16px; }
+.group[hidden] { display: none; }
 .label {
   padding: 0;
   font-size: 0.72rem;
@@ -133,6 +134,11 @@ input[type="range"] { width: 100%; margin: 0; accent-color: var(--brass); }
 .lobby-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .lobby-actions button { flex: 1; }
 .results { z-index: 6; width: min(460px, calc(100% - 32px)); }
+.piece-tip { position: fixed; z-index: 7; pointer-events: none; max-width: 260px; padding: 8px 11px; background: var(--card); color: var(--ink); border: 1px solid var(--rule); border-radius: 6px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35); font-size: 0.8rem; line-height: 1.4; }
+.piece-tip strong { display: block; font-family: var(--font-display); font-weight: 400; font-size: 0.92rem; }
+.piece-tip .tip-hp { color: var(--ink-soft); font-size: 0.74rem; }
+.piece-tip ul { margin: 4px 0 0; padding-left: 16px; }
+.piece-tip .cool { color: var(--ink-soft); }
 .results .note { margin: 0; }
 .results-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
 .results-table th { padding: 4px 6px; text-align: right; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-soft); border-bottom: 1.5px solid var(--rule); }
@@ -379,7 +385,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
       <button type="button" id="leaveOnline" hidden>Leave the online game</button>
     </section>
 
-    <section class="group">
+    <section class="group" id="diameterGroup">
       <div class="count-row">
         <label class="label" for="diameter">Sphere diameter</label>
         <output class="count" id="diameterValue" for="diameter">300 mm</output>
@@ -388,7 +394,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
       <div class="ends"><span>100 mm</span><span>1000 mm</span></div>
     </section>
 
-    <section class="group">
+    <section class="group" id="botGroup">
       <div class="count-row">
         <label class="label" for="botCount">Bots</label>
         <output class="count" id="botCountValue" for="botCount">3</output>
@@ -397,7 +403,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
       <div class="ends"><span>1</span><span id="botHint"></span><span>5</span></div>
     </section>
 
-    <section class="group">
+    <section class="group" id="timerGroup">
       <div class="count-row">
         <label class="label" for="timerLimit">Turn timer</label>
         <output class="count" id="timerLimitValue" for="timerLimit">1:00</output>
@@ -453,7 +459,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
 
     <section class="group">
       <span class="label">The ice</span>
-      <p class="note">After turn 7 a random rock turns to ice. Every turn after that the ice spreads 25 mm. Any piece it reaches, or that moves onto it, takes 40 damage, once a turn, and freezes if that leaves it at 0. The pale band shows where it will reach next. In the end it covers the whole sphere.</p>
+      <p class="note">After turn 7 a random rock turns to ice. Every turn after that the ice spreads 25 mm. Any piece it reaches, or that moves onto it, takes 35 damage, once a turn, and freezes if that leaves it at 0. The pale band shows where it will reach next. In the end it covers the whole sphere.</p>
     </section>
 
     <section class="group">
@@ -485,6 +491,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
 
   <main class="stage" id="stage">
     <canvas id="globe" tabindex="0" aria-label="3D globe board. Click to add a piece, drag to spin, right-drag to pan, scroll to zoom."></canvas>
+    <div class="piece-tip" id="pieceTip" role="tooltip" hidden></div>
     <div class="marks" id="marks" aria-hidden="true"></div>
     <div class="news" id="news"></div>
     <section class="board squad-card" aria-label="Your pieces"><h3>Your pieces</h3><div class="squad" id="squad"></div></section>
@@ -647,6 +654,7 @@ function groundMaterial(radiusMm, iceReach, colors = GROUND_PAINT) {
 /* ---------- Game piece ---------- */
 const PIECE_LENGTH_MM = 10;
 const MAX_PIECES = 3;
+const BOT_HUDDLE_MM = 50;     /* a bot side starts with all its pieces this close together */
 const MOVE_RANGE_MM = 50;      /* radius of the move circle */
 const ROLL_SECONDS = 0.5;       /* to curl up, and again to uncurl */
 const FIRE_RANGE_MM = 100;     /* radius of the cannon circle */
@@ -668,7 +676,8 @@ const ROCK_COUNT = [3, 24];    /* fewest and most on any sphere */
 const STONE_REACH = 1.27;      /* the farthest a stone's outline can reach, as a multiple of radius */
 const STONE_SPACING = 0.72;    /* how tightly stones sit in a row, so no piece fits between */
 const ROCK_GAP_MM = 14;        /* always room for a piece to pass between two rocks */
-const MUSHROOM_CHANCE = 0.375;       /* of one sprouting, each turn */
+const MUSHROOM_CHANCE = 0.375;       /* of mushrooms sprouting, each turn */
+const MUSHROOM_PAIR_CHANCE = 0.5;    /* that two sprout at once instead of one */
 const MUSHROOM_CLEARANCE_MM = 50;    /* it always sprouts farther than this from every piece */
 const MUSHROOM_BUD_TURNS = 2;        /* turns before it blooms */
 const MUSHROOM_BLOOM_TURNS = 3;      /* turns in bloom before it wilts */
@@ -686,7 +695,7 @@ const BURN_DAMAGE = 5;               /* at the start of each of the next turns *
 const BURN_TURNS = 2;
 const FLAME_HOLD_SECONDS = 1;        /* a plume burns at least this long, so it can be seen */
 const FLAME_GROW_SECONDS = 0.25;     /* it shoots out to full length in this time */
-const WIRE_DAMAGE = 20;
+const WIRE_DAMAGE = 10;
 const WIRE_REACH_MM = 0.9;           /* how far the barbs stick out from the wire */
 const RAIL_SPEED_MM = 30;            /* riding the railroad, per second */
 const RAIL_STEP_MM = 2;              /* distance between track points */
@@ -707,7 +716,7 @@ const TUMBLE_MM = 50;                /* how far a kicked ball rolls */
 const TUMBLE_SPEED_MM = 20;          /* per second */
 const TUMBLE_DAMAGE = 35;
 const TUMBLE_KNOCK_MM = 20;
-const ICE_DAMAGE = 40;               /* per turn, for a piece touching the ice */
+const ICE_DAMAGE = 35;               /* per turn, for a piece touching the ice */
 const ICE_COLD_DAMAGE = 25;          /* the same, with Ice Cold */
 const HEALING_PER_TURN = 2;
 const WILL_HP = 10;                  /* extra HP the closest teammate gets from a dying One for All piece */
@@ -725,20 +734,20 @@ const PERKS = [
   { id: "web", type: "fire", name: "Web", text: "The shell spins a web 30 mm wide (60 mm with Big shell) that stays for three turns. Anything entering it moves 20 mm at half speed on the following turn. On its own it does 10 damage within 10 mm; with Armor Piercing or Big shell it does theirs instead." },
   { id: "decoy", type: "move", name: "Decoy", text: "Send a fake copy on a second move. It lasts until next turn. With Barbed Wire or Rail Road on, it lays fake wire or track: real to everyone else, but harmless, and gone when anything touches it or next turn. Can't be used two turns in a row.", cools: true },
   { id: "railroad", type: "move", name: "Rail Road", text: "Lays track behind the piece as it moves, through its tunnels too. Any piece whose move lands on track can then ride anywhere on the joined-up railroad, at 30 mm/s, but can't stop on track inside rock. Can't be used two turns in a row.", cools: true },
-  { id: "barbed", type: "move", name: "Barbed Wire", text: "Lays barbed wire behind the piece as it moves. Any enemy piece that touches it takes 20 damage, once per stretch of wire each turn; your own side can cross it safely. Can't be used two turns in a row.", cools: true },
+  { id: "barbed", type: "move", name: "Barbed Wire", text: "Lays barbed wire behind the piece as it moves. Any enemy piece that touches it takes 10 damage, once per stretch of wire each turn; your own side can cross it safely. Can't be used two turns in a row.", cools: true },
   { id: "melee", type: "move", name: "Melee", text: "Running into a piece does 15 damage and knocks it 10 mm away. Can't be used two turns in a row.", cools: true },
   { id: "flame", type: "fire", name: "Flame Thrower", text: "Range drops to 75 mm. Instead of a shell, it breathes a plume of flame toward the spot: a 7\u00b0 slice reaching 75 mm. Anything that touches it takes 20 damage, then 5 more at the start of each of the next 2 turns. Replaces the other cannon perks." },
   { id: "steel", type: "fire", passive: true, name: "Steel", text: "Always on: when this piece's cannon kills an enemy piece, it takes that piece's perks as well." },
   { id: "puddle", type: "fire", name: "Puddle", text: "The shell leaves a puddle of water across its blast. When the ice reaches a puddle, the whole puddle freezes at once." },
   { id: "big", type: "fire", name: "Big shell", text: "Every blast ring is twice as wide, but damage is halved: 25 within 10 mm, 13 within 20 mm, 5 within 40 mm. Also doubles a web." },
-  { id: "icecold", type: "passive", passive: true, name: "Ice Cold", text: "The ice costs this piece 25 HP a turn instead of 40." },
+  { id: "icecold", type: "passive", passive: true, name: "Ice Cold", text: "The ice costs this piece 25 HP a turn instead of 35." },
   { id: "oneforall", type: "passive", passive: true, name: "One for All", text: "When a teammate dies, this piece takes any of its perks it lacks. When this piece dies, the closest teammate gets its perks and 10 HP." },
   { id: "healing", type: "passive", passive: true, name: "Healing", text: "Regains 2 HP at the end of every turn." },
   { id: "foresight", type: "passive", passive: true, name: "Foresight", text: "Shows you which rock turns to ice first. No use once the ice has started." },
   { id: "easy", type: "passive", passive: true, name: "Easy route", text: "Resets this piece's medals of valor to 1, but from then on every 2 medals earns a perk." },
   { id: "recuperate", type: "ball", name: "Recuperate", text: "Switch on, then roll into a ball: restores 5 HP." },
   { id: "selfdestruct", type: "ball", name: "Self Destruct", text: "Switch on, then roll into a ball: 2 seconds later the piece explodes and dies. 50 damage within 15 mm, 40 within 25, 30 within 35, 20 within 45 mm." },
-  { id: "rolling", type: "ball", name: "Rolling Destruction", text: "Always on: when an enemy attack hurts this piece, it rolls up and rolls 50 mm toward that enemy. Switched on and rolled into a ball, a piece running into it kicks it 50 mm too. Anything the ball rolls into takes 35 damage and is knocked 20 mm." },
+  { id: "rolling", type: "ball", cools: 2, name: "Rolling Destruction", text: "Switch on, then roll into a ball: if an enemy shell or flame hits the ball this turn, it rolls 50 mm toward the piece that fired. Anything it rolls into takes 35 damage and is knocked 20 mm. Then it needs 2 turns before it can do that again." },
   { id: "igloo", type: "ball", cools: 2, name: "Igloo", text: "Switch on, then roll into a ball: if the ice catches it this turn, the ball rolls itself off the ice, unharmed. Then it needs 2 turns before it can do that again." },
   { id: "darkarts", type: "ball", cools: 2, name: "Dark Arts", text: "Switch on, then roll up on a fallen teammate's blood splatter to bring that piece back at 25 HP, with no perks. Then it needs 2 turns before it can do that again." },
   { id: "pain", type: "ball", name: "Pain packet", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell." },
@@ -2285,6 +2294,7 @@ function startBoard() {
   const deselectButton = document.getElementById("deselect");
   const diameterInput = document.getElementById("diameter");
   const diameterValue = document.getElementById("diameterValue");
+  const setupGroups = ["diameterGroup", "botGroup", "timerGroup"].map((id) => document.getElementById(id));
 
   function say(message) {
     const mine = yours();
@@ -2310,6 +2320,7 @@ function startBoard() {
     }
     pieceNote.textContent = message;
     botInput.disabled = placementOver || online();
+    for (const group of setupGroups) group.hidden = placementOver;   /* settings are fixed once the game starts */
     botHint.textContent = placementOver ? "Clear pieces to change" : "";
     doneButton.disabled = busy || !placementOver || gameOver || !mine.length || !!choosing || (online() && net.waiting);
     clearButton.disabled = busy || pieces.length === 0 || online();
@@ -2643,6 +2654,52 @@ function startBoard() {
     return best;
   }
 
+  /* Hovering the mouse over one of your own pieces shows its perks. */
+  const pieceTip = document.getElementById("pieceTip");
+  const hideTip = () => { pieceTip.hidden = true; };
+  function showTip(piece, x, y) {
+    pieceTip.textContent = "";
+    const title = document.createElement("strong");
+    title.textContent = piece.record && piece.record.name ? piece.record.name : "Your piece";
+    const hp = document.createElement("span");
+    hp.className = "tip-hp";
+    hp.textContent = `${piece.hp} HP`;
+    pieceTip.append(title, hp);
+    const owned = PERKS.filter((perk) => hasPerk(piece, perk.id));
+    if (!owned.length) {
+      const none = document.createElement("div");
+      none.textContent = "No perks yet";
+      pieceTip.append(none);
+    } else {
+      const list = document.createElement("ul");
+      for (const perk of owned) {
+        const item = document.createElement("li");
+        item.textContent = perk.name;
+        if (!perk.passive && !perkReady(piece, perk.id)) {
+          const cool = document.createElement("span");
+          cool.className = "cool";
+          cool.textContent = " (cooling down)";
+          item.append(cool);
+        }
+        list.append(item);
+      }
+      pieceTip.append(list);
+    }
+    pieceTip.hidden = false;
+    const box = pieceTip.getBoundingClientRect();
+    pieceTip.style.left = Math.max(8, Math.min(x + 16, innerWidth - box.width - 8)) + "px";
+    pieceTip.style.top = Math.max(8, Math.min(y + 16, innerHeight - box.height - 8)) + "px";
+  }
+  canvas.addEventListener("pointermove", (e) => {
+    if (e.pointerType !== "mouse" || e.buttons) return hideTip();
+    const piece = pieceAt(e.clientX, e.clientY);
+    if (!piece || piece.decoy || piece.team !== localTeam) return hideTip();
+    showTip(piece, e.clientX, e.clientY);
+  });
+  canvas.addEventListener("pointerleave", hideTip);
+  canvas.addEventListener("pointerdown", hideTip);
+  canvas.addEventListener("wheel", hideTip, { passive: true });
+
   /* ---------- Rocks ---------- */
   /* Rocks keep their sizes in mm, so a bigger sphere gets more of them, up to a limit.
      They stay clear of each other and of any pieces, and a seed keeps the layout
@@ -2968,24 +3025,67 @@ function startBoard() {
   /* Each bot piece takes the roomiest of many random spots, so all the pieces end up
      spread around the sphere, whatever its size. Bots take turns placing, there and
      back, because a side placing last would land among everyone else. */
+  /* Each bot side starts in a huddle: every one of its pieces within 50 mm of the
+     others, in the open spot farthest from everyone already placed. */
   function placeBotPieces() {
     ice.future = rocks[Math.floor(rand() * rocks.length)] || null;
-    const order = [];
-    for (let round = 0; round < MAX_PIECES; round++) {
-      order.push(...(round % 2 ? botTeams().reverse() : botTeams()));
-    }
-    for (const team of order) {
-      let best = null;
-      let bestRoom = -1;
-      for (let tries = 0; tries < 60; tries++) {
-        const spot = randomDirection();
-        if (rockGap({ up: spot, forward: spot, curl: 1 }) < PIECE_LENGTH_MM) continue;
-        const room = Math.min(...pieces.map((p) => p.up.angleTo(spot)));
-        if (room > bestRoom) { best = spot; bestRoom = room; }
-      }
-      const [a, b] = tangentPair(best);
+    const clearOfRock = (spot) => rockGap({ up: spot, forward: spot, curl: 1 }) >= PIECE_LENGTH_MM;
+    const roomAt = (spot) => (pieces.length ? Math.min(...pieces.map((p) => p.up.angleTo(spot))) : Math.PI);
+    const near = (centre, mm) => {
+      const [a, b] = tangentPair(centre);
+      const turn = Math.random() * Math.PI * 2;
+      const toward = a.multiplyScalar(Math.cos(turn)).addScaledVector(b, Math.sin(turn));
+      const axis = new THREE.Vector3().crossVectors(centre, toward).normalize();
+      return centre.clone().applyAxisAngle(axis, mm / radiusMm()).normalize();
+    };
+    const facingAt = (spot) => {
+      const [a, b] = tangentPair(spot);
       const facing = Math.random() * Math.PI * 2;
-      addPiece(team, best, a.multiplyScalar(Math.cos(facing)).addScaledVector(b, Math.sin(facing)).normalize());
+      return a.multiplyScalar(Math.cos(facing)).addScaledVector(b, Math.sin(facing)).normalize();
+    };
+    for (const team of botTeams()) {
+      let spots = null;
+      for (let attempt = 0; attempt < 30 && !spots; attempt++) {
+        let centre = null;
+        let bestRoom = -1;
+        for (let tries = 0; tries < 60; tries++) {
+          const spot = randomDirection();
+          if (!clearOfRock(spot)) continue;
+          const room = roomAt(spot);
+          if (room > bestRoom) { centre = spot; bestRoom = room; }
+        }
+        if (!centre) continue;
+        /* Any two spots within 25 mm of the centre are within 50 mm of each other. */
+        const group = [];
+        for (let n = 0; n < MAX_PIECES; n++) {
+          let found = null;
+          for (let tries = 0; tries < 200 && !found; tries++) {
+            const spot = n === 0 && tries === 0 ? centre.clone() : near(centre, BOT_HUDDLE_MM / 2 * Math.sqrt(Math.random()));
+            if (!clearOfRock(spot)) continue;
+            if ([...pieces.map((p) => p.up), ...group].some((other) => mmBetween(other, spot) < PIECE_LENGTH_MM * 1.6)) continue;
+            found = spot;
+          }
+          if (!found) break;
+          group.push(found);
+        }
+        if (group.length === MAX_PIECES) spots = group;
+      }
+      /* Nowhere fits a huddle (a tiny, rocky sphere): spread out as before. */
+      if (!spots) {
+        spots = [];
+        for (let n = 0; n < MAX_PIECES; n++) {
+          let best = null;
+          let bestRoom = -1;
+          for (let tries = 0; tries < 60; tries++) {
+            const spot = randomDirection();
+            if (!clearOfRock(spot)) continue;
+            const room = Math.min(roomAt(spot), ...spots.map((s2) => s2.angleTo(spot)));
+            if (room > bestRoom) { best = spot; bestRoom = room; }
+          }
+          if (best) spots.push(best);
+        }
+      }
+      for (const spot of spots) addPiece(team, spot, facingAt(spot));
     }
   }
 
@@ -3844,6 +3944,7 @@ function startBoard() {
       }
       const ball = balled(piece);
       if (ball) packPain(piece, shell);
+      if (ball && !shell.self) strikeBack(piece, shell.shooter);
       if (ball && !piercing) {
         turnState.blocks++;
         showDamage(piece, 0);
@@ -3856,7 +3957,6 @@ function startBoard() {
       turnState.hits++;
       showDamage(piece, damage);
       showHealth(piece);
-      if (damage > 0 && !shell.self) strikeBack(piece, shell.shooter);
       if (piece.hp === 0) {
         turnState.kills++;
         squish(piece);
@@ -3982,7 +4082,7 @@ function startBoard() {
         rollOffIce(piece);
         continue;
       }
-      /* The ice costs 40 HP (25 with Ice Cold) the first time each turn a piece touches
+      /* The ice costs 35 HP (25 with Ice Cold) the first time each turn a piece touches
          it, and freezes it only if that leaves it at 0. */
       if (piece.iceTurn === turnState.number) continue;
       piece.iceTurn = turnState.number;
@@ -4628,7 +4728,6 @@ function startBoard() {
         }
         floatLabel(piece, "Barbed wire", "hit");
         hurt(piece, WIRE_DAMAGE, line.owner);
-        strikeBack(piece, line.owner);
       }
     }
   }
@@ -4840,6 +4939,7 @@ function startBoard() {
         if (balled(piece)) {
           showDamage(piece, 0);
           if (enemies) awardMedal(piece);
+          strikeBack(piece, flame.shooter);
           continue;
         }
         piece.burnLeft = BURN_TURNS;
@@ -4851,7 +4951,6 @@ function startBoard() {
           awardMedal(flame.shooter);
         }
         hurt(piece, FLAME_DAMAGE, flame.shooter, true);
-        strikeBack(piece, flame.shooter);
       }
     }
     needsDraw = true;
@@ -5212,7 +5311,6 @@ function startBoard() {
     turnState.hits++;
     showDamage(target, MELEE_DAMAGE);
     showHealth(target);
-    strikeBack(target, attacker);
     if (target.hp === 0) {
       turnState.kills++;
       squish(target);
@@ -5366,7 +5464,6 @@ function startBoard() {
     const popped = new Set();
     const hits = [];
     const rolledInto = [];
-    const kickable = (kicker, ball) => crawled.has(kicker) && balled(ball) && !ball.tumble && !ball.decoy && perkOn(ball, "rolling");
     pieces.forEach((a, i) => {
       for (const b of pieces.slice(i + 1)) {
         if (!crawled.has(a) && !crawled.has(b)) continue;
@@ -5386,14 +5483,6 @@ function startBoard() {
             roller.tumble.hit.add(other);
             rolledInto.push([roller, other]);
           }
-        } else if (kickable(a, b) || kickable(b, a)) {
-          /* Running into a ball with Rolling Destruction kicks it away. */
-          const ball = kickable(a, b) ? b : a;
-          const kicker = ball === a ? b : a;
-          ball.rolledInto = ball.rolledInto || new Set();
-          ball.rolledInto.add(kicker);
-          ball.tumble = { axis: new THREE.Vector3().crossVectors(kicker.up, ball.up).normalize(), left: TUMBLE_MM, hit: ball.rolledInto };
-          stopped.add(kicker);
         } else {
           stopped.add(a).add(b);
           if (crawled.has(a) && !a.shove && perkOn(a, "melee")) hits.push([a, b]);
@@ -5465,14 +5554,16 @@ function startBoard() {
     poseOnSphere(piece);
   }
 
-  /* Rolling Destruction: hurt by an enemy, the piece rolls up and rolls 50 mm straight
-     at it, once a turn. A piece still waiting to fire gets its shot off first. */
+  /* Rolling Destruction: a ball rolled up with it switched on, hit by an enemy shell or
+     flame, rolls 50 mm straight at the piece that fired. Then it waits 2 turns. */
   function strikeBack(piece, attacker) {
     if (!attacker || attacker === piece || attacker.team === piece.team) return;
-    if (!hasPerk(piece, "rolling") || piece.decoy || piece.digging || piece.hp <= 0) return;
+    if (!balled(piece) || !perkOn(piece, "rolling") || !perkReady(piece, "rolling")) return;
+    if (piece.decoy || piece.digging || piece.hp <= 0) return;
     if (!pieces.includes(piece) || !pieces.includes(attacker) || piece.tumble) return;
     if (piece.strikeTurn === turnState.number) return;
     piece.strikeTurn = turnState.number;
+    piece.perkTurn.rolling = turnState.number;
     piece.strikeAt = attacker;
     if (!piece.shot) rollAt(piece);
   }
@@ -5511,7 +5602,6 @@ function startBoard() {
     turnState.hits++;
     showDamage(target, TUMBLE_DAMAGE);
     showHealth(target);
-    strikeBack(target, roller);
     if (target.hp === 0) {
       turnState.kills++;
       squish(target);
@@ -5775,16 +5865,22 @@ function startBoard() {
   /* The chance comes first, so a turn with no room is simply a turn with no mushroom. */
   function sproutMushroom() {
     if (rand() >= MUSHROOM_CHANCE) return;
-    for (let tries = 0; tries < MUSHROOM_SPOT_TRIES; tries++) {
-      const spot = randomDirection();
-      if (pieces.some((p) => mmBetween(p.up, spot) <= MUSHROOM_CLEARANCE_MM)) continue;
-      if (iceMargin(spot) <= ICE_STEP_MM) continue;   /* it would be gone before it bloomed */
-      if (mushrooms.some((m) => !m.gone && mmBetween(m.up, spot) <= MUSHROOM_RADIUS_MM * 4)) continue;
-      if (rockGap({ up: spot, forward: spot, curl: 1 }) < MUSHROOM_RADIUS_MM) continue;
-      addMushroom(spot);
-      announce(`A mushroom has sprouted! It blooms in ${MUSHROOM_BUD_TURNS} turns.`, spot);
-      return;
+    const count = rand() < MUSHROOM_PAIR_CHANCE ? 2 : 1;
+    const sprouted = [];
+    for (let n = 0; n < count; n++) {
+      for (let tries = 0; tries < MUSHROOM_SPOT_TRIES; tries++) {
+        const spot = randomDirection();
+        if (pieces.some((p) => mmBetween(p.up, spot) <= MUSHROOM_CLEARANCE_MM)) continue;
+        if (iceMargin(spot) <= ICE_STEP_MM) continue;   /* it would be gone before it bloomed */
+        if (mushrooms.some((m) => !m.gone && mmBetween(m.up, spot) <= MUSHROOM_RADIUS_MM * 4)) continue;
+        if (rockGap({ up: spot, forward: spot, curl: 1 }) < MUSHROOM_RADIUS_MM) continue;
+        addMushroom(spot);
+        sprouted.push(spot);
+        break;
+      }
     }
+    if (sprouted.length === 2) announce(`Two mushrooms have sprouted! They bloom in ${MUSHROOM_BUD_TURNS} turns.`, sprouted[0]);
+    else if (sprouted.length) announce(`A mushroom has sprouted! It blooms in ${MUSHROOM_BUD_TURNS} turns.`, sprouted[0]);
   }
 
   /* Runs at the end of each turn. */
