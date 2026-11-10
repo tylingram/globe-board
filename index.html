@@ -59,6 +59,8 @@ h1 {
 .group { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; border: 0; min-width: 0; }
 .group + .group { border-top: 1px solid var(--rule); padding-top: 16px; }
 .group[hidden] { display: none; }
+.label.sub { font-size: 0.72rem; text-transform: none; letter-spacing: 0; }
+.count.small { font-size: 1.05rem; }
 .label {
   padding: 0;
   font-size: 0.72rem;
@@ -412,6 +414,26 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
       <div class="ends"><span>5 s</span><span>2 min</span></div>
     </section>
 
+    <section class="group" id="iceGroup">
+      <span class="label">Ice spread per turn</span>
+      <div class="count-row">
+        <label class="label sub" for="iceStep0">Under 50% iced</label>
+        <output class="count small" id="iceStep0Value" for="iceStep0">22 mm</output>
+      </div>
+      <input type="range" id="iceStep0" min="5" max="40" step="1" value="22">
+      <div class="count-row">
+        <label class="label sub" for="iceStep1">50&ndash;80% iced</label>
+        <output class="count small" id="iceStep1Value" for="iceStep1">18 mm</output>
+      </div>
+      <input type="range" id="iceStep1" min="5" max="40" step="1" value="18">
+      <div class="count-row">
+        <label class="label sub" for="iceStep2">Over 80% iced</label>
+        <output class="count small" id="iceStep2Value" for="iceStep2">14 mm</output>
+      </div>
+      <input type="range" id="iceStep2" min="5" max="40" step="1" value="14">
+      <div class="ends"><span>5 mm</span><span>40 mm</span></div>
+    </section>
+
     <section class="group">
       <div class="count-row">
         <span class="label" id="turnLabel">Turn 1</span>
@@ -459,7 +481,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
 
     <section class="group">
       <span class="label">The ice</span>
-      <p class="note">After turn 7 a random rock turns to ice. Every turn after that the ice spreads 25 mm. Any piece it reaches, or that moves onto it, takes 35 damage, once a turn, and freezes if that leaves it at 0. The pale band shows where it will reach next. In the end it covers the whole sphere.</p>
+      <p class="note">After turn 7 a random rock turns to ice. Every turn after that the ice spreads: by default 22 mm a turn while it covers under half the globe, 18 mm up to 80%, then 14 mm (set with the Ice spread sliders). Any piece it reaches, or that moves onto it, takes 35 damage, once a turn, and freezes if that leaves it at 0. The pale band shows where it will reach next. In the end it covers the whole sphere.</p>
     </section>
 
     <section class="group">
@@ -580,7 +602,7 @@ const GROUND_SHADER = `
 const GROUND_PAINT = { name: "ground", low: "#5f4228", high: "#8d6a44", patchLow: "#3f5a24", patchHigh: "#7b9440" };
 const CLIFF_TOP_PAINT = { name: "cliff-top", low: "#a9aaa6", high: "#d6d5cd", patchLow: "#7f8384", patchHigh: "#a3a6a6" };
 
-function groundMaterial(radiusMm, iceReach, colors = GROUND_PAINT) {
+function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
   const literal = (hex) => {
     const c = linear(hex);
     return `vec3(${c.r.toFixed(4)}, ${c.g.toFixed(4)}, ${c.b.toFixed(4)})`;
@@ -588,15 +610,15 @@ function groundMaterial(radiusMm, iceReach, colors = GROUND_PAINT) {
   const material = new THREE.MeshStandardMaterial({ roughness: 0.95, metalness: 0 });
   material.extensions = { derivatives: true };
   material.customProgramCacheKey = () => colors.name;
-  const ICE_STEP = ICE_STEP_MM.toFixed(1);
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uRadiusMm = radiusMm;
     shader.uniforms.uIceReach = iceReach;
+    shader.uniforms.uIceStep = iceStep;
     shader.vertexShader = shader.vertexShader
       .replace("#include <common>", "#include <common>\nvarying vec3 vBallPoint;\nattribute float aIceDist;\nvarying float vIceDist;")
       .replace("#include <begin_vertex>", "#include <begin_vertex>\nvBallPoint = position;\nvIceDist = aIceDist;");
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", "#include <common>\n" + GROUND_SHADER + "\nuniform float uIceReach;\nvarying float vIceDist;")
+      .replace("#include <common>", "#include <common>\n" + GROUND_SHADER + "\nuniform float uIceReach;\nuniform float uIceStep;\nvarying float vIceDist;")
       .replace("#include <color_fragment>", `
         #include <color_fragment>
         vec3 groundMm = normalize(vBallPoint) * uRadiusMm;
@@ -623,8 +645,8 @@ function groundMaterial(radiusMm, iceReach, colors = GROUND_PAINT) {
         float crack = smoothstep(0.0, 0.05, abs(layeredNoise(groundMm + 700.0, 16.0, mmPerPixel)));
         vec3 frost = mix(${literal("#a8d8ee")}, ${literal("#eef9fd")}, clamp(0.55 + blotch * 0.8 + clods * 0.4, 0.0, 1.0));
         frost *= mix(0.72, 1.0, crack);
-        float nextBand = (1.0 - frozen) * (1.0 - smoothstep(${ICE_STEP} - 0.7, ${ICE_STEP} + 0.7, iceEdge));
-        float nextLine = 1.0 - smoothstep(0.0, 0.6 + mmPerPixel * 1.5, abs(iceEdge - ${ICE_STEP}));
+        float nextBand = (1.0 - frozen) * (1.0 - smoothstep(uIceStep - 0.7, uIceStep + 0.7, iceEdge));
+        float nextLine = 1.0 - smoothstep(0.0, 0.6 + mmPerPixel * 1.5, abs(iceEdge - uIceStep));
         diffuseColor.rgb = mix(diffuseColor.rgb, ${literal("#bfe6f5")}, max(nextBand * 0.22, nextLine * 0.75));
         diffuseColor.rgb = mix(diffuseColor.rgb, frost, frozen);
 
@@ -801,7 +823,9 @@ const MELEE_KNOCK_MM = 10;
 const MELEE_KNOCK_SPEED_MM = 60;     /* per second */
 const WEB_HOLD_SECONDS = 1.2;        /* a web stays at least this long, so it can be seen */
 const ICE_CALM_TURNS = 7;             /* turns played before the first rock freezes */
-const ICE_STEP_MM = 25;              /* how far it spreads each turn */
+const ICE_STEPS_DEFAULT = [22, 18, 14];   /* mm a turn: under 50% of the globe iced, 50-80%, over 80% */
+const ICE_STEP_STAGES = [0.5, 0.8];          /* the iced shares where the spread changes */
+const ICE_COVER_SAMPLES = 4000;              /* spots used to measure how much of the globe is iced */
 const ICE_SPEED_MM = 25;             /* per second, while it spreads */
 const ICE_START_MM = -6;             /* starts just inside the rock's edge, so nothing beside it freezes at once */
 const ICE_ROCK_MARGIN_MM = 8;        /* a rock looks frozen a little ahead of the ground around it */
@@ -1721,10 +1745,12 @@ function startBoard() {
 
   const groundRadius = { value: 150 };
   const iceReach = { value: -1e5 };   /* far below anything, until the ice starts */
-  const groundPaint = groundMaterial(groundRadius, iceReach);
+  const iceStepU = { value: ICE_STEPS_DEFAULT[0] };   /* how far the next spread goes, for the pale band */
+  let iceSteps = [...ICE_STEPS_DEFAULT];
+  const groundPaint = groundMaterial(groundRadius, iceReach, iceStepU);
   const groundMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 192, 128), groundPaint);
   globe.add(groundMesh);
-  const cliffTopMesh = new THREE.Mesh(new THREE.BufferGeometry(), groundMaterial(groundRadius, iceReach, CLIFF_TOP_PAINT));
+  const cliffTopMesh = new THREE.Mesh(new THREE.BufferGeometry(), groundMaterial(groundRadius, iceReach, iceStepU, CLIFF_TOP_PAINT));
   globe.add(cliffTopMesh);
   const rockMesh = new THREE.Mesh(
     new THREE.BufferGeometry(),
@@ -2316,7 +2342,9 @@ function startBoard() {
   const deselectButton = document.getElementById("deselect");
   const diameterInput = document.getElementById("diameter");
   const diameterValue = document.getElementById("diameterValue");
-  const setupGroups = ["diameterGroup", "botGroup", "timerGroup"].map((id) => document.getElementById(id));
+  const setupGroups = ["diameterGroup", "botGroup", "timerGroup", "iceGroup"].map((id) => document.getElementById(id));
+  const iceStepInputs = [0, 1, 2].map((i) => document.getElementById("iceStep" + i));
+  const iceStepValues = [0, 1, 2].map((i) => document.getElementById("iceStep" + i + "Value"));
 
   function say(message) {
     const mine = yours();
@@ -2351,7 +2379,8 @@ function startBoard() {
     deselectButton.disabled = !selected;
     diameterInput.disabled = busy || !!ice.rock || online();   /* new rocks would leave the ice with no rock */
     const calmLeft = ICE_CALM_TURNS + 1 - turnState.number;
-    iceNote.textContent = ice.rock ? `The ice spreads ${ICE_STEP_MM} mm at the end of every turn.`
+    iceStepU.value = ice.rock ? nextIceStep() : iceSteps[0];
+    iceNote.textContent = ice.rock ? `The ice covers ${Math.round(iceCover(ice.reach) * 100)}% of the globe and spreads ${nextIceStep()} mm at the end of this turn.`
       : calmLeft === 1 ? "Ice arrives after this turn."
       : `Ice arrives in ${calmLeft} turns.`;
     actMove.disabled = !selected;
@@ -3401,7 +3430,7 @@ function startBoard() {
       /* The ice will have moved once more by the time of a second move. */
       let onward = option.room;
       for (const next of spotsFrom(option.spot, [reach], 8)) {
-        const later = next.room - ICE_STEP_MM;
+        const later = next.room - nextIceStep();
         if (later <= onward) break;
         if (open(option.spot, next.spot)) {
           onward = later;
@@ -4269,7 +4298,7 @@ function startBoard() {
     ice.spreads = 0;
     for (const mesh of [groundMesh, cliffTopMesh, rockMesh]) measureIce(mesh.geometry);
     iceReach.value = ice.reach;
-    announce(`A rock has turned to ice! It spreads ${ICE_STEP_MM} mm every turn.`, ice.rock.up);
+    announce(`A rock has turned to ice! It spreads ${iceSteps[0]} mm a turn while it covers under half the globe.`, ice.rock.up);
     needsDraw = true;
   }
 
@@ -4282,18 +4311,50 @@ function startBoard() {
     freezeCaught();
   }
 
+  /* How much of the globe the ice covers, as a share: spots spread evenly over the
+     sphere, each with its ice distance measured once, sorted. */
+  function iceCover(reach) {
+    if (!ice.rock) return 0;
+    const key = rocks.indexOf(ice.rock) + "@" + radiusMm();
+    if (!ice.cover || ice.cover.key !== key) {
+      const list = new Float64Array(ICE_COVER_SAMPLES);
+      for (let i = 0; i < ICE_COVER_SAMPLES; i++) {
+        const y = 1 - (2 * (i + 0.5)) / ICE_COVER_SAMPLES;
+        const ring = Math.sqrt(1 - y * y);
+        const turn = i * Math.PI * (3 - Math.sqrt(5));
+        list[i] = iceDistance(new THREE.Vector3(Math.cos(turn) * ring, y, Math.sin(turn) * ring));
+      }
+      list.sort();
+      ice.cover = { key, list };
+    }
+    const list = ice.cover.list;
+    let low = 0, high = list.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (list[mid] <= reach) low = mid + 1; else high = mid;
+    }
+    return low / list.length;
+  }
+  /* The next spread: 22 mm while under half the globe is iced, 18 mm up to 80%, then
+     14 mm, unless the sliders say otherwise. */
+  function nextIceStep() {
+    const covered = iceCover(Math.max(ice.goal, ice.reach));
+    return covered < ICE_STEP_STAGES[0] ? iceSteps[0] : covered < ICE_STEP_STAGES[1] ? iceSteps[1] : iceSteps[2];
+  }
+
   /* How far a spot is from where the ice will be after this turn. Below zero is lost. */
   const iceMargin = (spot, piece) => {
     if (ice.rock) {
-      let room = iceDistance(spot) - ice.reach - ICE_STEP_MM;
+      const step = nextIceStep();
+      let room = iceDistance(spot) - ice.reach - step;
       for (const puddle of puddles) {
-        const soon = puddle.frozen || iceDistance(puddle.spot) - puddle.radius <= ice.reach + ICE_STEP_MM;
+        const soon = puddle.frozen || iceDistance(puddle.spot) - puddle.radius <= ice.reach + step;
         if (soon) room = Math.min(room, mmBetween(puddle.spot, spot) - puddle.radius);
       }
       return room;
     }
     if (piece && ice.future && hasPerk(piece, "foresight") && turnState.number >= ICE_CALM_TURNS - 1) {
-      return Math.acos(Math.min(1, spot.dot(ice.future.up))) * radiusMm() - ice.future.reach - ICE_STEP_MM;
+      return Math.acos(Math.min(1, spot.dot(ice.future.up))) * radiusMm() - ice.future.reach - iceSteps[0];
     }
     return Infinity;
   };
@@ -5629,7 +5690,8 @@ function startBoard() {
     /* Once everything else is done, the ice spreads, unless the game is already won. */
     if (ice.rock && !ice.spread && sidesLeft() > 1) {
       ice.spread = true;
-      ice.goal = ICE_STEP_MM * ++ice.spreads;
+      ice.goal = Math.max(0, ice.goal) + nextIceStep();
+      ice.spreads++;
       sound.ice((ice.goal - ice.reach) / ICE_SPEED_MM / playSpeed);
       return;
     }
@@ -6117,7 +6179,7 @@ function startBoard() {
       for (let tries = 0; tries < MUSHROOM_SPOT_TRIES; tries++) {
         const spot = randomDirection();
         if (pieces.some((p) => mmBetween(p.up, spot) <= MUSHROOM_CLEARANCE_MM)) continue;
-        if (iceMargin(spot) <= ICE_STEP_MM) continue;   /* it would be gone before it bloomed */
+        if (iceMargin(spot) <= nextIceStep()) continue;   /* it would be gone before it bloomed */
         if (mushrooms.some((m) => !m.gone && mmBetween(m.up, spot) <= MUSHROOM_RADIUS_MM * 4)) continue;
         if (rockGap({ up: spot, forward: spot, curl: 1 }) < MUSHROOM_RADIUS_MM) continue;
         addMushroom(spot);
@@ -6381,6 +6443,18 @@ function startBoard() {
     drawTimer();
   }
   timerInput.addEventListener("input", () => setTimerLimit(Number(timerInput.value)));
+  function setIceSteps(steps) {
+    iceSteps = steps.map((mm) => Math.min(40, Math.max(5, Math.round(Number(mm) || 0))));
+    iceSteps.forEach((mm, i) => {
+      iceStepInputs[i].value = mm;
+      iceStepValues[i].textContent = mm + " mm";
+    });
+    iceStepU.value = ice.rock ? nextIceStep() : iceSteps[0];
+    needsDraw = true;
+  }
+  for (const input of iceStepInputs) {
+    input.addEventListener("input", () => setIceSteps(iceStepInputs.map((x) => x.value)));
+  }
   setTimerLimit(Number(timerInput.value) || 60);
 
   actMove.addEventListener("click", () => chooseAction("move"));
@@ -6467,7 +6541,7 @@ function startBoard() {
         hitBy: [...line.hitBy].filter(([q]) => pieces.includes(q)).map(([q, turn]) => [q.id, turn]), medalTurn: line.medalTurn ?? null })),
       mushrooms: mushrooms.filter((m) => !m.gone).map((m) => ({ up: V(m.up), stage: m.stage, turns: m.turns })),
       frozen: frozen.map((mesh) => mesh.userData.frozenData).filter(Boolean),
-      ice: { rock: ice.rock ? rocks.indexOf(ice.rock) : -1, future: ice.future ? rocks.indexOf(ice.future) : -1, reach: ice.reach, goal: ice.goal, spreads: ice.spreads },
+      ice: { rock: ice.rock ? rocks.indexOf(ice.rock) : -1, future: ice.future ? rocks.indexOf(ice.future) : -1, reach: ice.reach, goal: ice.goal, spreads: ice.spreads, steps: iceSteps },
       picks,
     };
   }
@@ -6621,6 +6695,7 @@ function startBoard() {
     ice.reach = snap.ice.reach;
     ice.goal = snap.ice.goal;
     ice.spreads = snap.ice.spreads;
+    if (Array.isArray(snap.ice.steps)) setIceSteps(snap.ice.steps);
     iceReach.value = ice.rock ? ice.reach : -1e5;
     if (ice.rock && ice.mark) {
       ice.mark.remove();
@@ -6811,6 +6886,7 @@ function startBoard() {
     layOutRocks();
     timerInput.value = data.timer;
     setTimerLimit(data.timer);
+    if (Array.isArray(data.iceSteps)) setIceSteps(data.iceSteps);
     setBotCount(botTeams().length);
     pieceCount = 0;
     seedRand(data.seed);
@@ -7136,7 +7212,7 @@ function startBoard() {
     const hostName = (room.players.find((player) => player.id === room.host) || {}).name || "?";
     const seats = plannedSeats();
     lobbyScreen(net.host ? "Your game" : `${hostName}'s game`, net.host
-      ? `Uses your settings from the panel: ${board.diameter} mm sphere, ${seats.filter((seat) => !seat.human).length} bots, ${clockText(turnTimer.limit)} turns. Change them there before you start.`
+      ? `Uses your settings from the panel: ${board.diameter} mm sphere, ${seats.filter((seat) => !seat.human).length} bots, ${clockText(turnTimer.limit)} turns, ice spreading ${iceSteps.join(" / ")} mm. Change them there before you start.`
       : `Waiting for ${hostName} to start the game. The host chooses the sphere, the bots and the turn timer.`);
     const list = document.createElement("ul");
     list.className = "lobby-list";
@@ -7159,7 +7235,7 @@ function startBoard() {
     if (net.host) {
       const start = lobbyButton("Start the game", () => {
         const data = { t: "start", seats: plannedSeats(), seed: Math.floor(Math.random() * 2 ** 31), rockSeed: Math.floor(Math.random() * 1e9),
-          diameter: board.diameter, timer: turnTimer.limit };
+          diameter: board.diameter, timer: turnTimer.limit, iceSteps };
         send({ t: "begin" });
         toOthers(data);
         beginOnline(data);
@@ -7172,7 +7248,7 @@ function startBoard() {
   playOnlineButton.addEventListener("click", () => (net.ws ? (net.room ? showRoom() : showLobbyList()) : showNameEntry()));
   leaveOnlineButton.addEventListener("click", () => location.reload());
   /* While in a room, the host's own panel settings show up in the room as they change. */
-  for (const input of [diameterInput, botInput, timerInput]) {
+  for (const input of [diameterInput, botInput, timerInput, ...iceStepInputs]) {
     input.addEventListener("input", () => {
       if (net.room && !net.inGame && !lobby.hidden) showRoom();
     });
