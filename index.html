@@ -134,6 +134,12 @@ input[type="range"] { width: 100%; margin: 0; accent-color: var(--brass); }
 .lobby-list li i { width: 12px; height: 12px; border-radius: 50%; flex: none; }
 .lobby-list .empty { color: var(--ink-soft); justify-content: center; }
 .lobby-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.dev { z-index: 6; width: min(420px, calc(100% - 32px)); }
+.dev .note { margin: 0; }
+.dev-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; max-height: 52vh; padding-right: 4px; }
+.dev-list .perk-group-label { margin-top: 6px; }
+.dev-list .check { align-items: flex-start; }
+.dev-list .check small { display: block; color: var(--ink-soft); font-size: 0.74rem; line-height: 1.3; }
 .lobby-actions button { flex: 1; }
 .results { z-index: 6; width: min(460px, calc(100% - 32px)); }
 .piece-tip { position: fixed; z-index: 7; pointer-events: none; max-width: 260px; padding: 8px 11px; background: var(--card); color: var(--ink); border: 1px solid var(--rule); border-radius: 6px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35); font-size: 0.8rem; line-height: 1.4; }
@@ -459,6 +465,8 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
       </div>
       <label class="check"><input type="checkbox" id="centerOnPick" checked> Center the view on a piece when I pick it</label>
       <label class="check"><input type="checkbox" id="soundOn" checked> Sound effects</label>
+      <label class="check"><input type="checkbox" id="devMode"> Dev mode</label>
+      <button type="button" id="devPerks" hidden>Add perks (dev)</button>
       <button type="button" id="deselect">Deselect piece</button>
       <button type="button" class="primary" id="done">I'm done with my turn</button>
       <button type="button" id="clear">Clear pieces</button>
@@ -531,6 +539,13 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
       <h2 id="pickerTitle">Choose a perk</h2>
       <p class="note" id="pickerNote"></p>
       <div class="perks" id="pickerList"></div>
+    </div>
+    <div class="picker dev" id="devPicker" role="dialog" aria-labelledby="devTitle" hidden>
+      <h2 id="devTitle">Perks</h2>
+      <p class="note" id="devNote">Tick the perks this piece should have. Unticking one takes it away.</p>
+      <div class="lobby-actions"><button type="button" id="devAll">Tick all</button><button type="button" id="devNone">Untick all</button></div>
+      <div class="dev-list" id="devList"></div>
+      <div class="lobby-actions"><button type="button" class="primary" id="devApply">Apply</button><button type="button" id="devCancel">Cancel</button></div>
     </div>
     <div class="picker results" id="results" role="dialog" aria-labelledby="resultsTitle" hidden>
       <h2 id="resultsTitle">Game over</h2>
@@ -2343,6 +2358,12 @@ function startBoard() {
   const diameterInput = document.getElementById("diameter");
   const diameterValue = document.getElementById("diameterValue");
   const setupGroups = ["diameterGroup", "botGroup", "timerGroup", "iceGroup"].map((id) => document.getElementById(id));
+  const devMode = document.getElementById("devMode");
+  const devPerksButton = document.getElementById("devPerks");
+  const devPicker = document.getElementById("devPicker");
+  const devList = document.getElementById("devList");
+  let devPiece = null;
+  const devTarget = () => (devMode.checked && !online() ? [devPiece, selected].find((p) => p && pieces.includes(p) && !p.decoy) || null : null);
   const iceStepInputs = [0, 1, 2].map((i) => document.getElementById("iceStep" + i));
   const iceStepValues = [0, 1, 2].map((i) => document.getElementById("iceStep" + i + "Value"));
 
@@ -2372,6 +2393,8 @@ function startBoard() {
     botInput.disabled = placementOver || online();
     showLastLand();
     for (const group of setupGroups) group.hidden = placementOver;   /* settings are fixed once the game starts */
+    devMode.disabled = online();
+    showDevButton();
     botHint.textContent = placementOver ? "Clear pieces to change" : "";
     doneButton.disabled = busy || !placementOver || gameOver || !mine.length || !!choosing || (online() && net.waiting);
     clearButton.disabled = busy || pieces.length === 0 || online();
@@ -3643,6 +3666,7 @@ function startBoard() {
       }
     }
     const piece = pieceAt(clientX, clientY);
+    if (piece && devMode.checked && !online()) devPiece = piece.decoy ? null : piece;
     if (piece && piece.team !== localTeam) {
       const owned = PERKS.filter((perk) => hasPerk(piece, perk.id)).map((perk) => perk.name);
       const medalCount = `${piece.medals} ${piece.medals === 1 ? "medal" : "medals"} of valor`;
@@ -3665,6 +3689,63 @@ function startBoard() {
       say(idleMessage());
     }
   }
+
+  /* ---------- Dev mode ---------- */
+  /* Offline only: click any piece, then "Add perks (dev)" to give it any set of perks. */
+  function showDevButton() {
+    const target = devTarget();
+    devPerksButton.hidden = !target;
+    if (target) devPerksButton.textContent = `Add perks (dev): ${target.record && target.record.name ? target.record.name : teamName(target.team) + "'s piece"}`;
+  }
+  function openDevPicker() {
+    const piece = devTarget();
+    if (!piece) return;
+    document.getElementById("devTitle").textContent = `Perks for ${piece.record && piece.record.name ? piece.record.name : teamName(piece.team) + "'s piece"}`;
+    devList.textContent = "";
+    for (const type of PERK_TYPES) {
+      const label = document.createElement("span");
+      label.className = "perk-group-label";
+      label.textContent = type.name;
+      devList.append(label);
+      for (const perk of PERKS.filter((x) => x.type === type.id)) {
+        const row = document.createElement("label");
+        row.className = "check";
+        const box = document.createElement("input");
+        box.type = "checkbox";
+        box.value = perk.id;
+        box.checked = hasPerk(piece, perk.id);
+        const words = document.createElement("span");
+        words.textContent = perk.name;
+        const about = document.createElement("small");
+        about.textContent = perk.text;
+        words.append(about);
+        row.append(box, words);
+        devList.append(row);
+      }
+    }
+    devPicker.dataset.piece = piece.id;
+    devPicker.hidden = false;
+  }
+  function applyDevPerks() {
+    const piece = pieces.find((p) => String(p.id) === devPicker.dataset.piece);
+    devPicker.hidden = true;
+    if (!piece) return;
+    const want = new Set([...devList.querySelectorAll("input:checked")].map((box) => box.value));
+    piece.perks = piece.perks.filter((id) => want.has(id));
+    for (const id of [...piece.perksOn]) if (!want.has(id)) piece.perksOn.delete(id);
+    for (const perk of PERKS) if (want.has(perk.id)) gainPerk(piece, perk.id);
+    piece.tag.classList.toggle("perked", piece.perks.length > 0);
+    if (piece === selected) drawPerks();
+    drawArrow(piece);
+    say(`Dev mode: that piece now has ${piece.perks.length ? piece.perks.length + " perk" + (piece.perks.length === 1 ? "" : "s") : "no perks"}.`);
+  }
+  devMode.addEventListener("change", () => { if (!devMode.checked) devPicker.hidden = true; say(pieceNote.textContent); });
+  devPerksButton.addEventListener("click", openDevPicker);
+  document.getElementById("devApply").addEventListener("click", applyDevPerks);
+  document.getElementById("devCancel").addEventListener("click", () => { devPicker.hidden = true; });
+  document.getElementById("devAll").addEventListener("click", () => devList.querySelectorAll("input").forEach((box) => { box.checked = true; }));
+  document.getElementById("devNone").addEventListener("click", () => devList.querySelectorAll("input").forEach((box) => { box.checked = false; }));
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !devPicker.hidden) devPicker.hidden = true; });
 
   const sidesStanding = () => [...new Set(pieces.filter((p) => !p.decoy).map((p) => p.team))];
   const sidesLeft = () => sidesStanding().length;
