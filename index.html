@@ -625,67 +625,111 @@ const GROUND_SHADER = `
    slope down to the base line, or the same upside down for a valley. Where hills meet,
    the higher one wins; hills and valleys never touch, so every slope stays between
    1 mm in 3 and 1 mm in 10. The same sum runs here and in the ground shader. */
-const TERRAIN_MAX = 40;        /* hills, ridges and valleys on the globe, at most */
+const TERRAIN_MAX = 240;       /* lumps, spurs and valley stretches on the globe, at most */
 const TERRAIN_LIMIT_MM = 10;   /* the highest hill and the deepest valley */
 const TERRAIN_HIGH_SHARE = 0.25;   /* of the globe above the base line */
 const TERRAIN_LOW_SHARE = 0.15;    /* and below it; the rest stays level */
 const TERRAIN_STEEP = 1 / 3;       /* slopes run between 1 mm in 3 */
 const TERRAIN_GENTLE = 1 / 10;     /* and 1 mm in 10 */
-const terrainUniforms = {
-  uTerrainA: { value: Array.from({ length: TERRAIN_MAX }, () => new THREE.Vector4()) },   /* start xyz, level top radius mm */
-  uTerrainB: { value: Array.from({ length: TERRAIN_MAX }, () => new THREE.Vector4()) },   /* end xyz, height mm */
-  uTerrainW: { value: new Array(TERRAIN_MAX).fill(1) },                                    /* slope width mm */
-  uTerrainCount: { value: 0 },
-};
-const TERRAIN_GLSL = `
-  #define TERRAIN_MAX ${TERRAIN_MAX}
-  uniform vec4 uTerrainA[TERRAIN_MAX];
-  uniform vec4 uTerrainB[TERRAIN_MAX];
-  uniform float uTerrainW[TERRAIN_MAX];
-  uniform int uTerrainCount;
-  /* Angle from p to the arc a-b (a single point when a = b). */
-  float arcAngle(vec3 p, vec3 a, vec3 b) {
-    float toA = acos(clamp(dot(p, a), -1.0, 1.0));
-    if (dot(a, b) > 0.999999) return toA;
-    vec3 n = normalize(cross(a, b));
-    vec3 q = p - n * dot(p, n);
-    if (dot(cross(a, q), n) >= 0.0 && dot(cross(q, b), n) >= 0.0) return asin(clamp(abs(dot(p, n)), 0.0, 1.0));
-    return min(toA, acos(clamp(dot(p, b), -1.0, 1.0)));
+const TERRAIN_WAVES = 5;           /* low waves that make the outlines wander and wiggle */
+const TERRAIN_WAVE_SLOPE = 0.055;  /* each wave tilts a slope by at most this much */
+
+/* ---------- Hills and valleys ----------
+   Each piece of ground is a lump (or a spur along a short arc) with a small level top
+   and a straight slope down to the base line; a valley stretch is the same upside down.
+   Hills are clusters of lumps and spurs; valleys wind in a chain of stretches. Where
+   pieces of the same kind meet, the higher (or deeper) wins, and hills and valleys
+   never touch. A few long, low waves nudge every distance, so the outlines wander. The
+   slopes are chosen so that, waves and all, every grade stays between 1 in 3 and 1 in
+   10. Heights are worked out here, once per point of the ground mesh, and the graphics
+   card blends between points; that is plenty for contour lines every 1 mm. */
+/* A piece of ground: { a, b, top, width, height }, made ready
+   by prepareTerrainPiece for a sphere of a given radius. */
+function prepareTerrainPiece(f, radiusMm, waveMm) {
+  f.single = f.a.dot(f.b) > 0.999999;
+  if (f.single) f.b = f.a.clone();
+  f.n = f.single ? new THREE.Vector3() : new THREE.Vector3().crossVectors(f.a, f.b).normalize();
+  f.na = new THREE.Vector3().crossVectors(f.n, f.a);
+  f.bn = new THREE.Vector3().crossVectors(f.b, f.n);
+  f.c = f.a.clone().add(f.b).normalize();
+  f.cosReach = Math.cos(Math.min(Math.PI, f.a.angleTo(f.b) / 2 + (f.top + f.width + waveMm + 0.5) / radiusMm));
+  return f;
+}
+function terrainWave(waves, x, y, z) {
+  let sum = 0;
+  for (const w of waves) sum += w.amp * Math.sin(w.freq * (w.k.x * x + w.k.y * y + w.k.z * z) + w.phase);
+  return sum;
+}
+function terrainPieceHeight(f, x, y, z, wave, radiusMm) {
+  if (f.c.x * x + f.c.y * y + f.c.z * z < f.cosReach) return 0;
+  const da = Math.max(-1, Math.min(1, f.a.x * x + f.a.y * y + f.a.z * z));
+  let angle;
+  if (f.single) angle = Math.acos(da);
+  else if (f.na.x * x + f.na.y * y + f.na.z * z >= 0 && f.bn.x * x + f.bn.y * y + f.bn.z * z >= 0) {
+    angle = Math.asin(Math.min(1, Math.abs(f.n.x * x + f.n.y * y + f.n.z * z)));
+  } else {
+    angle = Math.min(Math.acos(da), Math.acos(Math.max(-1, Math.min(1, f.b.x * x + f.b.y * y + f.b.z * z))));
   }
-  float terrainHeight(vec3 p, float radiusMm) {
-    float high = 0.0;
-    float low = 0.0;
-    for (int i = 0; i < TERRAIN_MAX; i++) {
-      if (i >= uTerrainCount) break;
-      float d = arcAngle(p, uTerrainA[i].xyz, uTerrainB[i].xyz) * radiusMm;
-      float h = uTerrainB[i].w * clamp(1.0 - (d - uTerrainA[i].w) / uTerrainW[i], 0.0, 1.0);
-      if (h > 0.0) high = max(high, h); else low = min(low, h);
+  const out = angle * radiusMm + wave - f.top;
+  const tall = Math.abs(f.height);
+  const drop = out <= 0 ? 0
+    : out < f.w1 ? out * (f.d1 / f.w1)
+    : out < f.w1 + f.w2 ? f.d1 + (out - f.w1) * ((f.d2 - f.d1) / f.w2)
+    : f.d2 + (out - f.w1 - f.w2) * ((tall - f.d2) / Math.max(f.width - f.w1 - f.w2, 0.001));
+  return Math.sign(f.height) * Math.max(0, tall - drop);
+}
+/* A lookup so each spot only checks the pieces of ground near it: the globe split into
+   cells on the six faces of a cube, each listing the pieces that can reach into it. */
+const TERRAIN_CELLS = 16;
+function terrainCell(x, y, z) {
+  const ax = Math.abs(x), ay = Math.abs(y), az = Math.abs(z);
+  let face, u, v, m;
+  if (ax >= ay && ax >= az) { face = x > 0 ? 0 : 1; u = y; v = z; m = ax; }
+  else if (ay >= az) { face = y > 0 ? 2 : 3; u = x; v = z; m = ay; }
+  else { face = z > 0 ? 4 : 5; u = x; v = y; m = az; }
+  const n = TERRAIN_CELLS;
+  const i = Math.min(n - 1, Math.floor(((u / m + 1) / 2) * n));
+  const j = Math.min(n - 1, Math.floor(((v / m + 1) / 2) * n));
+  return (face * n + i) * n + j;
+}
+function indexTerrain(features) {
+  const n = TERRAIN_CELLS;
+  const cells = Array.from({ length: 6 * n * n }, () => []);
+  const centre = new THREE.Vector3();
+  for (let face = 0; face < 6; face++) {
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        const u = ((i + 0.5) / n) * 2 - 1, v = ((j + 0.5) / n) * 2 - 1, sign = face % 2 ? -1 : 1;
+        if (face < 2) centre.set(sign, u, v); else if (face < 4) centre.set(u, sign, v); else centre.set(u, v, sign);
+        centre.normalize();
+        const list = cells[(face * n + i) * n + j];
+        for (const f of features) {
+          if (centre.dot(f.c) >= Math.cos(Math.min(Math.PI, Math.acos(Math.min(1, f.cosReach)) + 0.13))) list.push(f);
+        }
+      }
     }
-    return high + low;
   }
-`;
-function arcAngle(p, a, b) {
-  const toA = Math.acos(Math.min(1, Math.max(-1, p.dot(a))));
-  if (a.dot(b) > 0.999999) return toA;
-  const n = new THREE.Vector3().crossVectors(a, b).normalize();
-  const q = p.clone().addScaledVector(n, -p.dot(n));
-  if (new THREE.Vector3().crossVectors(a, q).dot(n) >= 0 && new THREE.Vector3().crossVectors(q, b).dot(n) >= 0) {
-    return Math.asin(Math.min(1, Math.abs(p.dot(n))));
-  }
-  return Math.min(toA, Math.acos(Math.min(1, Math.max(-1, p.dot(b)))));
+  return cells;
 }
-function featureHeight(feature, up, radiusMm) {
-  const d = arcAngle(up, feature.a, feature.b) * radiusMm;
-  return feature.height * Math.min(1, Math.max(0, 1 - (d - feature.top) / feature.width));
-}
-function terrainAt(features, up, radiusMm) {
+function terrainHeightAt(features, waves, x, y, z, radiusMm) {
+  const length = Math.sqrt(x * x + y * y + z * z) || 1;
+  x /= length; y /= length; z /= length;
+  const list = features.cells ? features.cells[terrainCell(x, y, z)] : features;
+  if (!list.length) return 0;
+  const wave = terrainWave(waves, x, y, z);
   let high = 0;
   let low = 0;
-  for (const feature of features) {
-    const h = featureHeight(feature, up, radiusMm);
-    if (h > 0) high = Math.max(high, h); else low = Math.min(low, h);
+  for (const f of list) {
+    const h = terrainPieceHeight(f, x, y, z, wave, radiusMm);
+    if (h > 0) high = Math.max(high, h); else if (h < 0) low = Math.min(low, h);
   }
   return high + low;
+}
+/* How far the ground stands above the base sphere under a direction, in sphere radii.
+   Everything that sits on the ground adds this. Set once the hills are laid out. */
+let groundLift = () => 0;
+function onGround(v, lift) {
+  return v.multiplyScalar(lift + groundLift(v));
 }
 
 const GROUND_PAINT = { name: "ground", low: "#5f4228", high: "#8d6a44", patchLow: "#3f5a24", patchHigh: "#7b9440" };
@@ -704,12 +748,11 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
     shader.uniforms.uRadiusMm = radiusMm;
     shader.uniforms.uIceReach = iceReach;
     shader.uniforms.uIceStep = iceStep;
-    if (hills) Object.assign(shader.uniforms, terrainUniforms);
     shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vBallPoint;\nattribute float aIceDist;\nvarying float vIceDist;")
-      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvBallPoint = position;\nvIceDist = aIceDist;");
+      .replace("#include <common>", "#include <common>\nvarying vec3 vBallPoint;\nattribute float aIceDist;\nvarying float vIceDist;" + (hills ? "\nattribute float aElev;\nvarying float vElev;" : ""))
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvBallPoint = position;\nvIceDist = aIceDist;" + (hills ? "\nvElev = aElev;" : ""));
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", "#include <common>\n" + GROUND_SHADER + (hills ? TERRAIN_GLSL : "") + "\nuniform float uIceReach;\nuniform float uIceStep;\nvarying float vIceDist;")
+      .replace("#include <common>", "#include <common>\n" + GROUND_SHADER + (hills ? "\nvarying float vElev;" : "") + "\nuniform float uIceReach;\nuniform float uIceStep;\nvarying float vIceDist;")
       .replace("#include <color_fragment>", `
         #include <color_fragment>
         vec3 groundMm = normalize(vBallPoint) * uRadiusMm;
@@ -731,7 +774,7 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
 
         /* Hills and valleys: higher ground a little lighter, lower a little darker, with
            a contour line every 1 mm and a stronger one every 5 mm. */
-        float elevation = ${hills ? "terrainHeight(normalize(vBallPoint), uRadiusMm)" : "0.0"};
+        float elevation = ${hills ? "vElev" : "0.0"};
         diffuseColor.rgb = mix(diffuseColor.rgb, ${literal("#c9a46a")}, clamp(elevation / 10.0, 0.0, 1.0) * 0.38);
         diffuseColor.rgb = mix(diffuseColor.rgb, ${literal("#2a2f2a")}, clamp(-elevation / 10.0, 0.0, 1.0) * 0.45);
         {
@@ -758,7 +801,7 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
         diffuseColor.rgb = mix(diffuseColor.rgb, frost, frozen);
 
         /* Height in sphere radii, used only to shade the bumps. */
-        float groundHeight = ((1.0 - frozen) * (clods * 0.9 + grit * 0.12 + moss * (0.5 + tuft * 0.5)) + elevation * 1.6) / uRadiusMm;
+        float groundHeight = ((1.0 - frozen) * (clods * 0.9 + grit * 0.12 + moss * (0.5 + tuft * 0.5)) ) / uRadiusMm;
       `)
       .replace("#include <roughnessmap_fragment>", `
         #include <roughnessmap_fragment>
@@ -1210,9 +1253,8 @@ function tangentPair(up) {
 }
 
 /* A ring on the sphere between two angles from `up`. An inner angle of 0 fills it. */
-function capGeometry(up, innerAngle, outerAngle) {
+function capGeometry(up, innerAngle, outerAngle, rings = 28) {
   const [a, b] = tangentPair(up);
-  const rings = 28;
   const around = 128;
   const positions = [];
   const index = [];
@@ -1223,8 +1265,8 @@ function capGeometry(up, innerAngle, outerAngle) {
       const spin = (i / around) * Math.PI * 2;
       point.copy(up).multiplyScalar(Math.cos(angle))
         .addScaledVector(a, Math.sin(angle) * Math.cos(spin))
-        .addScaledVector(b, Math.sin(angle) * Math.sin(spin))
-        .multiplyScalar(MARK_LIFT);
+        .addScaledVector(b, Math.sin(angle) * Math.sin(spin));
+      onGround(point, MARK_LIFT);
       positions.push(point.x, point.y, point.z);
     }
   }
@@ -1247,11 +1289,10 @@ function arrowGeometry(from, to, startGap, halfWidth, headLength) {
   const distance = from.angleTo(to);
   const along = to.clone().addScaledVector(from, -to.dot(from)).normalize();
   const side = new THREE.Vector3().crossVectors(from, along).normalize();
-  const spot = (angle, offset) => from.clone().multiplyScalar(Math.cos(angle))
+  const spot = (angle, offset) => onGround(from.clone().multiplyScalar(Math.cos(angle))
     .addScaledVector(along, Math.sin(angle))
     .addScaledVector(side, offset)
-    .normalize()
-    .multiplyScalar(MARK_LIFT);
+    .normalize(), MARK_LIFT);
 
   const start = Math.min(startGap, distance * 0.35);
   const head = Math.min(headLength, distance * 0.45);
@@ -1813,8 +1854,8 @@ function surfacePatch(up, angle, heading) {
       point.copy(up)
         .addScaledVector(across, (u * 2 - 1) * half)
         .addScaledVector(along, (v * 2 - 1) * half)
-        .normalize()
-        .multiplyScalar(SPLAT_LIFT);
+        .normalize();
+      onGround(point, SPLAT_LIFT);
       positions.push(point.x, point.y, point.z);
       normals.push(point.x, point.y, point.z);
       uvs.push(u, v);
@@ -1855,7 +1896,12 @@ function startBoard() {
   const iceStepU = { value: ICE_STEPS_DEFAULT[0] };   /* how far the next spread goes, for the pale band */
   let iceSteps = [...ICE_STEPS_DEFAULT];
   const groundPaint = groundMaterial(groundRadius, iceReach, iceStepU);
-  const groundMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 192, 128), groundPaint);
+  const groundMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 288, 180), groundPaint);
+  const groundBase = groundMesh.geometry.attributes.position.array.slice();   /* the unit sphere */
+  /* Drawn a touch behind whatever lies on it, so marks on a slope never dip under. */
+  groundPaint.polygonOffset = true;
+  groundPaint.polygonOffsetFactor = 1.5;
+  groundPaint.polygonOffsetUnits = 2;
   globe.add(groundMesh);
   const cliffTopMesh = new THREE.Mesh(new THREE.BufferGeometry(), groundMaterial(groundRadius, iceReach, iceStepU, CLIFF_TOP_PAINT));
   globe.add(cliffTopMesh);
@@ -2544,22 +2590,21 @@ function startBoard() {
   circleFill.visible = circleEdge.visible = false;
   const plainFill = circleFill.material;
   const plainEdge = circleEdge.material;
-  const rangeUniforms = { uCenter: { value: new THREE.Vector3(0, 1, 0) }, uBase: { value: FIRE_RANGE_MM }, uEdge: { value: 1 }, uRadiusMm: groundRadius };
+  const rangeUniforms = { uEdge: { value: 1 } };
   /* Every spot whose distance is within 100 mm plus the shooter's height minus its own. */
   function rangePaint(edge) {
     const paint = new THREE.MeshBasicMaterial({ transparent: true, opacity: edge ? 0.95 : 0.2, depthWrite: false, side: THREE.DoubleSide });
     paint.extensions = { derivatives: true };
     paint.customProgramCacheKey = () => (edge ? "range-edge" : "range-fill");
     paint.onBeforeCompile = (shader) => {
-      Object.assign(shader.uniforms, terrainUniforms, rangeUniforms);
+      Object.assign(shader.uniforms, rangeUniforms);
       shader.vertexShader = shader.vertexShader
-        .replace("#include <common>", "#include <common>\nvarying vec3 vBallPoint;")
-        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvBallPoint = position;");
+        .replace("#include <common>", "#include <common>\nattribute float aOver;\nvarying float vOver;")
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvOver = aOver;");
       shader.fragmentShader = shader.fragmentShader
-        .replace("#include <common>", "#include <common>\nvarying vec3 vBallPoint;\nuniform vec3 uCenter;\nuniform float uBase;\nuniform float uEdge;\nuniform float uRadiusMm;\n" + TERRAIN_GLSL)
+        .replace("#include <common>", "#include <common>\nvarying float vOver;\nuniform float uEdge;")
         .replace("#include <clipping_planes_fragment>", `
-          vec3 spot = normalize(vBallPoint);
-          float over = acos(clamp(dot(spot, uCenter), -1.0, 1.0)) * uRadiusMm - (uBase - terrainHeight(spot, uRadiusMm));
+          float over = vOver;
           ${edge ? "if (abs(over) > uEdge * 0.5) discard;" : "if (over > 0.0) discard;"}
           #include <clipping_planes_fragment>`);
     };
@@ -2589,12 +2634,22 @@ function startBoard() {
       /* The cannon: shaped by the hills, so drawn wide and trimmed in the shader. */
       circleFill.material = rangeFill;
       circleEdge.material = rangeEdge;
-      rangeUniforms.uCenter.value.copy(orderFrom()).normalize();
-      rangeUniforms.uBase.value = FIRE_RANGE_MM + elevation(orderFrom());
       rangeUniforms.uEdge.value = markWidthMm();
       const widest = (FIRE_RANGE_MM + 2 * TERRAIN_LIMIT_MM + 2) / radiusMm();
-      circleFill.geometry = capGeometry(orderFrom(), 0, widest);
-      circleEdge.geometry = capGeometry(orderFrom(), 0, widest);
+      const area = capGeometry(orderFrom(), 0, widest, 72);
+      /* for each point: its distance, less the cannon's reach to it (below 0 is in range) */
+      const from = orderFrom().clone().normalize();
+      const base = FIRE_RANGE_MM + elevation(from);
+      const places = area.attributes.position;
+      const over = new Float32Array(places.count);
+      const q = new THREE.Vector3();
+      for (let i = 0; i < places.count; i++) {
+        q.fromBufferAttribute(places, i).normalize();
+        over[i] = mmBetween(from, q) - (base - elevation(q));
+      }
+      area.setAttribute("aOver", new THREE.BufferAttribute(over, 1));
+      circleFill.geometry = area;
+      circleEdge.geometry = area.clone();
     } else {
       circleFill.material = plainFill;
       circleEdge.material = plainEdge;
@@ -2691,7 +2746,7 @@ function startBoard() {
       if (piece.decoyPlan) extra(piece.up, piece.decoyPlan, hologramPaint);
       if (piece.railPath && piece.railPath.length > 1) {
         const line = new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints(piece.railPath.map((v) => v.clone().multiplyScalar(1 + 1.2 / r))),
+          new THREE.BufferGeometry().setFromPoints(piece.railPath.map((v) => onGround(v.clone().normalize(), 1 + 1.2 / r))),
           new THREE.LineBasicMaterial({ color: arrowPaint[piece.team].color })
         );
         globe.add(line);
@@ -2891,7 +2946,7 @@ function startBoard() {
   /* Faces the piece along `forward` and stands it on `up`. */
   function poseOnSphere(piece) {
     const right = new THREE.Vector3().crossVectors(piece.up, piece.forward);
-    piece.mesh.position.copy(piece.up);
+    piece.mesh.position.copy(piece.up).multiplyScalar(1 + groundLift(piece.up));
     piece.mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, piece.up, piece.forward));
   }
 
@@ -2907,8 +2962,10 @@ function startBoard() {
     );
     camera.updateMatrixWorld();
     raycaster.setFromCamera(pointer, camera);
-    const hit = raycaster.ray.intersectSphere(ballShape, new THREE.Vector3());
-    return hit ? hit.normalize().applyQuaternion(globe.quaternion.clone().invert()) : null;
+    globe.updateMatrixWorld();
+    const onHill = raycaster.intersectObject(groundMesh, false)[0];
+    const hit = onHill ? onHill.point.clone() : raycaster.ray.intersectSphere(ballShape, new THREE.Vector3());
+    return hit ? hit.applyQuaternion(globe.quaternion.clone().invert()).normalize() : null;
   }
 
   /* Picks by distance on screen, because a piece can be a few pixels long when zoomed out. */
@@ -2920,7 +2977,7 @@ function startBoard() {
     let best = null;
     let bestGap = reach;
     for (const piece of pieces) {
-      const world = piece.up.clone().applyQuaternion(globe.quaternion);
+      const world = piece.up.clone().multiplyScalar(1 + groundLift(piece.up)).applyQuaternion(globe.quaternion);
       if (world.dot(camera.position.clone().sub(world)) <= 0) continue;   /* far side */
       const screen = world.clone().project(camera);
       const gap = Math.hypot(
@@ -3027,10 +3084,23 @@ function startBoard() {
       rocks.push(rock);
     }
 
+    layOutTerrain();
     const positions = [];
     const colors = [];
     const tops = { positions: [], normals: [] };
     for (const rock of rocks) addRockShape(rock, r, positions, colors, tops);
+    const settle = (list) => {
+      const q = new THREE.Vector3();
+      for (let i = 0; i < list.length; i += 3) {
+        q.set(list[i], list[i + 1], list[i + 2]);
+        const radius = q.length();
+        q.divideScalar(radius);
+        const out = radius + groundLift(q) - (radius < 1 + 0.01 / r ? 2.5 / r : 0);
+        list[i] = q.x * out; list[i + 1] = q.y * out; list[i + 2] = q.z * out;
+      }
+    };
+    settle(positions);
+    settle(tops.positions);
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
     geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
@@ -3041,18 +3111,116 @@ function startBoard() {
     topShape.setAttribute("normal", new THREE.Float32BufferAttribute(tops.normals, 3));
     cliffTopMesh.geometry.dispose();
     cliffTopMesh.geometry = topShape;
-    layOutTerrain();
     needsDraw = true;
   }
 
   /* Hills first, until about a quarter of the globe is raised, then valleys until about
-     15% is lowered. Spots spread evenly over the globe measure the shares. Seeded like
-     the rocks, so every player online gets the same hills. */
+     15% is lowered. A hill is a cluster of 1-4 lumps and spurs; a valley winds as a
+     chain of 1-4 stretches, sometimes ending in a bowl. Spots spread evenly over the
+     globe measure the shares. Seeded like the rocks, so everyone online gets the same. */
   const terrain = [];
+  terrain.waves = [];
   function layOutTerrain() {
     const rand = seededRandom((rockSeed * 2654435761 + 977) >>> 0);
     const r = radiusMm();
     const grow = Math.max(1, r / 150);
+    const tops = Math.pow(grow, 1.5);
+    const reachGrow = Math.pow(grow, 1.2);
+    const randomUp = () => {
+      const y = rand() * 2 - 1;
+      const a = rand() * Math.PI * 2;
+      const ring = Math.sqrt(1 - y * y);
+      return new THREE.Vector3(ring * Math.cos(a), y, ring * Math.sin(a));
+    };
+    const tangentAt = (up) => {
+      const [u, v] = tangentPair(up);
+      const turn = rand() * Math.PI * 2;
+      return u.multiplyScalar(Math.cos(turn)).addScaledVector(v, Math.sin(turn));
+    };
+    const step = (from, toward, mm) => {
+      const axis = new THREE.Vector3().crossVectors(from, toward).normalize();
+      return from.clone().applyAxisAngle(axis, mm / r).normalize();
+    };
+    /* the waves: long and low, so together they tilt a slope by less than 0.28 */
+    const waves = [];
+    let waveMm = 0;
+    for (let k = 0; k < TERRAIN_WAVES; k++) {
+      const wavelength = (k < 2 ? 100 + rand() * 100 : 18 + rand() * 25) * grow;
+      const amp = (TERRAIN_WAVE_SLOPE * wavelength) / (2 * Math.PI);
+      waves.push({ k: randomUp(), phase: rand() * Math.PI * 2, freq: (2 * Math.PI * r) / wavelength, amp });
+      waveMm += amp;
+    }
+    const tilt = TERRAIN_WAVE_SLOPE * TERRAIN_WAVES;
+    const slopeLow = TERRAIN_GENTLE / (1 - tilt);
+    const slopeHigh = TERRAIN_STEEP / (1 + tilt);
+    const grade = (lean) => slopeLow + Math.min(1, Math.max(0, lean + (rand() - 0.5) * 0.3)) * (slopeHigh - slopeLow);
+    const piece = (a, b, height, top) => {
+      /* rounded shoulders and a long foot, or a steep crest over a gentle apron */
+      const rounded = rand() < 0.6;
+      const grades = rounded ? [grade(0.1), grade(0.9), grade(0.25)] : [grade(0.9), grade(0.45), grade(0.05)];
+      const tall = Math.abs(height);
+      const first = tall * (0.2 + rand() * 0.25);
+      const second = (tall - first) * (0.35 + rand() * 0.4);   /* always leaves a foot */
+      const w1 = first / grades[0];
+      const w2 = second / grades[1];
+      const w3 = (tall - first - second) / grades[2];
+      return prepareTerrainPiece({ a, b, top, height, w1, w2, d1: first, d2: first + second, width: w1 + w2 + w3 }, r, waveMm);
+    };
+    /* the way onward from `next`, having come from `at`, turned by up to `bend` either way */
+    const onward = (at, next, bend) => {
+      const heading = next.clone().sub(at);
+      heading.addScaledVector(next, -heading.dot(next)).normalize();
+      return heading.applyAxisAngle(next, (rand() - 0.5) * 2 * bend);
+    };
+    const hill = () => {
+      const height = 3 + rand() * (TERRAIN_LIMIT_MM - 3);
+      const parts = [];
+      const spine = [randomUp()];
+      let heading = tangentAt(spine[0]);
+      const bends = rand() < 0.3 ? 0 : 1 + Math.floor(rand() * 3);
+      for (let k = 0; k < bends; k++) {
+        const next = step(spine[k], heading, (8 + rand() * 26) * reachGrow);
+        heading = onward(spine[k], next, 1.0);
+        spine.push(next);
+      }
+      /* the spine, rising and falling a little along its length */
+      if (spine.length === 1) parts.push(piece(spine[0], spine[0].clone(), height, (1 + rand() * 5) * tops));
+      for (let k = 0; k + 1 < spine.length; k++) {
+        parts.push(piece(spine[k], spine[k + 1], height * (k === 0 ? 1 : 0.65 + rand() * 0.35), (0.5 + rand() * 3.5) * tops));
+      }
+      /* knolls and spurs off the spine, lower than it */
+      const extras = Math.floor(rand() * 4);
+      for (let k = 0; k < extras; k++) {
+        const from = spine[Math.floor(rand() * spine.length)];
+        const at = step(from, tangentAt(from), (4 + rand() * 18) * tops);
+        const end = rand() < 0.5 ? step(at, tangentAt(at), (6 + rand() * 18) * reachGrow) : at.clone();
+        parts.push(piece(at, end, height * (0.35 + rand() * 0.5), (0.5 + rand() * 4) * tops));
+      }
+      return parts;
+    };
+    const valley = () => {
+      let at = randomUp();
+      let heading = tangentAt(at);
+      const depth = -(3 + rand() * (TERRAIN_LIMIT_MM - 3));
+      const parts = [];
+      const stretches = 2 + Math.floor(rand() * 4);
+      const course = [at];
+      for (let k = 0; k < stretches; k++) {
+        const next = step(at, heading, (10 + rand() * 28) * reachGrow);
+        parts.push(piece(at, next, depth * (0.7 + rand() * 0.3), (0.5 + rand() * 3.5) * tops));
+        heading = onward(at, next, 0.8);   /* carry on from the end, turning a little */
+        at = next;
+        course.push(at);
+      }
+      if (rand() < 0.45) {   /* a shallower side branch */
+        const from = course[1 + Math.floor(rand() * (course.length - 1))];
+        const next = step(from, tangentAt(from), (10 + rand() * 22) * reachGrow);
+        parts.push(piece(from.clone(), next, depth * (0.4 + rand() * 0.35), (0.5 + rand() * 2.5) * tops));
+      }
+      if (rand() < 0.5) parts.push(piece(at.clone(), at.clone(), depth, (3 + rand() * 8) * tops));   /* a bowl at the end */
+      return parts;
+    };
+
     const count = 6000;
     const spots = [];
     for (let i = 0; i < count; i++) {
@@ -3061,70 +3229,86 @@ function startBoard() {
       const turn = i * Math.PI * (3 - Math.sqrt(5));
       spots.push(new THREE.Vector3(Math.cos(turn) * ring, y, Math.sin(turn) * ring));
     }
+    const spotWave = spots.map((q) => terrainWave(waves, q.x, q.y, q.z));
     const high = new Float32Array(count);
     const low = new Float32Array(count);
-    const share = (list) => list.reduce((n, h) => n + (Math.abs(h) > 0.05 ? 1 : 0), 0) / count;
-    const tops = Math.pow(grow, 1.5);   /* bigger globes get broader hills, not just more of them */
-    const randomUp = () => {
-      const y = rand() * 2 - 1;
-      const a = rand() * Math.PI * 2;
-      const ring = Math.sqrt(1 - y * y);
-      return new THREE.Vector3(ring * Math.cos(a), y, ring * Math.sin(a));
-    };
     terrain.length = 0;
-    for (const [sign, target, list, other, most] of [[1, TERRAIN_HIGH_SHARE, high, low, Math.round(TERRAIN_MAX * 0.6)], [-1, TERRAIN_LOW_SHARE, low, high, TERRAIN_MAX]]) {
+    for (const [sign, target, list, other, most, make] of [[1, TERRAIN_HIGH_SHARE, high, low, Math.round(TERRAIN_MAX * 0.6), hill], [-1, TERRAIN_LOW_SHARE, low, high, TERRAIN_MAX, valley]]) {
       let covered = 0;
-      for (let tries = 0; tries < 600 && covered / count < target && terrain.length < most; tries++) {
-        const height = sign * (3 + rand() * (TERRAIN_LIMIT_MM - 3));
-        const slope = TERRAIN_GENTLE + rand() * (TERRAIN_STEEP - TERRAIN_GENTLE);
-        const width = Math.abs(height) / slope;
-        const top = (2 + rand() * 18) * tops;
-        const a = randomUp();
-        let b = a.clone();
-        if (rand() < (sign > 0 ? 0.4 : 0.5)) {
-          const [u, v] = tangentPair(a);
-          const turn = rand() * Math.PI * 2;
-          const toward = u.multiplyScalar(Math.cos(turn)).addScaledVector(v, Math.sin(turn));
-          const axis = new THREE.Vector3().crossVectors(a, toward).normalize();
-          b = a.clone().applyAxisAngle(axis, ((25 + rand() * 60) * Math.pow(grow, 1.2)) / r).normalize();
-        }
-        const feature = { a, b, top, width, height };
-        const reachOut = top + width + mmBetween(a, b) / 2;
-        if (reachOut > Math.PI * r * 0.3) continue;   /* too big for this globe */
-        /* Never touching a feature of the other kind, with a little level ground between. */
-        const near = Math.cos(Math.min(Math.PI, (top + width + 6 + mmBetween(a, b)) / r));
-        const touched = [];
+      for (let tries = 0; tries < 500 && covered / count < target && terrain.length < most; tries++) {
+        const parts = make();
+        if (terrain.length + parts.length > most) continue;
+        if (parts.some((f) => f.a.angleTo(f.b) / 2 + (f.top + f.width) / r > Math.PI * 0.3)) continue;   /* too big for this globe */
+        /* never touching ground of the other kind, with a little level ground between */
+        const touched = new Map();
         let clash = false;
-        for (let i = 0; i < count && !clash; i++) {
-          if (spots[i].dot(a) < near) continue;
-          const d = arcAngle(spots[i], a, b) * r;
-          if (d > top + width + 4) continue;
-          if (other[i] !== 0) clash = true;
-          const h = featureHeight(feature, spots[i], r);
-          if (h !== 0) touched.push(i, h);
+        for (const f of parts) {
+          const margin = Math.cos(Math.min(Math.PI, Math.acos(Math.min(1, f.cosReach)) + 5 / r));
+          for (let i = 0; i < count && !clash; i++) {
+            const q = spots[i];
+            if (f.c.x * q.x + f.c.y * q.y + f.c.z * q.z < margin) continue;
+            if (other[i] !== 0) { clash = true; break; }
+            const h = terrainPieceHeight(f, q.x, q.y, q.z, spotWave[i], r);
+            if (h !== 0) touched.set(i, sign > 0 ? Math.max(touched.get(i) || 0, h) : Math.min(touched.get(i) || 0, h));
+          }
+          if (clash) break;
         }
         if (clash) continue;
         let gained = 0;
-        for (let k = 0; k < touched.length; k += 2) if (Math.abs(list[touched[k]]) <= 0.05 && Math.abs(touched[k + 1]) > 0.05) gained++;
+        for (const [i, h] of touched) if (Math.abs(list[i]) <= 0.05 && Math.abs(h) > 0.05) gained++;
         if ((covered + gained) / count > target + 0.03) continue;   /* overshoots: try a smaller one */
-        for (let k = 0; k < touched.length; k += 2) {
-          const i = touched[k];
-          list[i] = sign > 0 ? Math.max(list[i], touched[k + 1]) : Math.min(list[i], touched[k + 1]);
-        }
+        for (const [i, h] of touched) list[i] = sign > 0 ? Math.max(list[i], h) : Math.min(list[i], h);
         covered += gained;
-        terrain.push(feature);
+        terrain.push(...parts);
       }
     }
-    terrainUniforms.uTerrainCount.value = terrain.length;
-    terrain.forEach((f, i) => {
-      terrainUniforms.uTerrainA.value[i].set(f.a.x, f.a.y, f.a.z, f.top);
-      terrainUniforms.uTerrainB.value[i].set(f.b.x, f.b.y, f.b.z, f.height);
-      terrainUniforms.uTerrainW.value[i] = f.width;
-    });
-    terrain.shares = { high: share(high), low: share(low) };
+    terrain.waves = waves;
+    terrain.cells = indexTerrain(terrain);
+    terrain.shares = { high: high.reduce((n, h) => n + (h > 0.05 ? 1 : 0), 0) / count, low: low.reduce((n, h) => n + (h < -0.05 ? 1 : 0), 0) / count };
+
+    groundLift = (v) => terrainHeightAt(terrain, waves, v.x, v.y, v.z, r) / r;
+    raiseGround();
   }
+
+  /* The ground mesh follows the hills, with its normals worked out from the slope. */
+  function raiseGround() {
+    const geometry = groundMesh.geometry;
+    const places = geometry.attributes.position;
+    const normals = geometry.attributes.normal;
+    const { widthSegments: across, heightSegments: down } = geometry.parameters;
+    const r = radiusMm();
+    const out = places.array;
+    const heights = new Float32Array(places.count);
+    for (let i = 0; i < places.count; i++) {
+      const x = groundBase[i * 3], y = groundBase[i * 3 + 1], z = groundBase[i * 3 + 2];
+      heights[i] = terrainHeightAt(terrain, terrain.waves, x, y, z, r);
+      const scale = (1 + heights[i] / r) / (Math.sqrt(x * x + y * y + z * z) || 1);
+      out[i * 3] = x * scale; out[i * 3 + 1] = y * scale; out[i * 3 + 2] = z * scale;
+    }
+    geometry.setAttribute("aElev", new THREE.BufferAttribute(heights, 1));
+    /* normals across the grid: around and down, from the neighbours on each side */
+    const at = (ix, iy) => ((iy * (across + 1)) + ((ix + across) % across)) * 3;
+    const u = new THREE.Vector3(), v = new THREE.Vector3(), n = new THREE.Vector3(), p = new THREE.Vector3();
+    for (let iy = 0; iy <= down; iy++) {
+      for (let ix = 0; ix <= across; ix++) {
+        const i = (iy * (across + 1) + ix) * 3;
+        p.set(groundBase[i], groundBase[i + 1], groundBase[i + 2]).normalize();
+        if (iy === 0 || iy === down) { normals.setXYZ(i / 3, p.x, p.y, p.z); continue; }
+        const e = at(ix + 1, iy), w = at(ix - 1, iy), nn = at(ix, iy - 1), ss = at(ix, iy + 1);
+        u.set(out[e] - out[w], out[e + 1] - out[w + 1], out[e + 2] - out[w + 2]);
+        v.set(out[ss] - out[nn], out[ss + 1] - out[nn + 1], out[ss + 2] - out[nn + 2]);
+        n.crossVectors(u, v).normalize();
+        if (n.dot(p) < 0) n.negate();
+        normals.setXYZ(i / 3, n.x, n.y, n.z);
+      }
+    }
+    places.needsUpdate = true;
+    normals.needsUpdate = true;
+    geometry.computeBoundingSphere();
+  }
+
   /* Height of the ground in mm above (or below) the base line. */
-  const elevation = (up) => terrainAt(terrain, up, radiusMm());
+  const elevation = (up) => terrainHeightAt(terrain, terrain.waves, up.x, up.y, up.z, radiusMm());
   /* A cannon reaches 100 mm between spots at the same height, 1 mm farther for every
      mm the target is below the shooter, and 1 mm less for every mm above. */
   const cannonReach = (from, to) => FIRE_RANGE_MM + elevation(from) - elevation(to);
@@ -3320,7 +3504,8 @@ function startBoard() {
 
   /* Where a point on the globe lands in the stage, and whether it faces the viewer. */
   function onStage(point) {
-    const world = point.clone().applyQuaternion(globe.quaternion);
+    const world = point.clone().normalize();
+    world.multiplyScalar(1 + groundLift(world)).applyQuaternion(globe.quaternion);
     const front = world.dot(camera.position.clone().sub(world)) > 0;
     const seen = world.project(camera);
     return { x: ((seen.x + 1) / 2) * width, y: ((1 - seen.y) / 2) * height, front };
@@ -4240,7 +4425,7 @@ function startBoard() {
     const a = Math.sin((1 - t) * shell.arc);
     const b = Math.sin(t * shell.arc);
     const dir = shell.from.clone().multiplyScalar(a).addScaledVector(shell.target, b).normalize();
-    const radius = shell.startRadius + (1 - shell.startRadius) * t + 4 * shell.peak * t * (1 - t);
+    const radius = shell.startRadius + (shell.endRadius - shell.startRadius) * t + 4 * shell.peak * t * (1 - t);
     return dir.multiplyScalar(radius);
   }
 
@@ -4258,6 +4443,7 @@ function startBoard() {
       mods: shellMods(piece),
       from: start.clone().normalize(),
       startRadius: start.length(),
+      endRadius: 1 + groundLift(piece.fire),
       age: 0,
       mark: piece.aimMark,
     };
@@ -4297,7 +4483,7 @@ function startBoard() {
     const ball = new THREE.Mesh(glowShape, new THREE.MeshBasicMaterial({
       color: linear("#ff9a2e"), transparent: true, opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending,
     }));
-    ball.position.copy(spot);
+    ball.position.copy(spot).normalize().multiplyScalar(1 + groundLift(spot));
     ball.scale.setScalar(0.001);
     globe.add(ball);
     const blast = { ball, radius: radiusInMm / r, age: 0, life, floor: null };
@@ -4393,7 +4579,7 @@ function startBoard() {
   }
   function poseGhost(ghost) {
     const right = new THREE.Vector3().crossVectors(ghost.up, ghost.forward);
-    ghost.mesh.position.copy(ghost.up).multiplyScalar(1 + 2 / radiusMm());   /* floats a little */
+    ghost.mesh.position.copy(ghost.up).multiplyScalar(1 + 2 / radiusMm() + groundLift(ghost.up));   /* floats a little */
     ghost.mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, ghost.up, ghost.forward));
   }
   function removeGhost(ghost) {
@@ -4582,7 +4768,7 @@ function startBoard() {
     const spot = lastLandSpot(rock);
     if (!spot) return;
     const flag = makeFlag();
-    flag.position.copy(spot);
+    flag.position.copy(spot).multiplyScalar(1 + groundLift(spot));
     flag.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), spot);
     flag.scale.setScalar(1 / radiusMm());
     globe.add(flag);
@@ -4972,7 +5158,7 @@ function startBoard() {
     const r = radiusMm();
     const out = { positions: [], colors: [] };
     const frames = lineFrames(points);
-    const lift = (v, mm) => v.clone().normalize().multiplyScalar(1 + mm / r);
+    const lift = (v, mm) => onGround(v.clone().normalize(), 1 + mm / r);
     frames.forEach((f, i) => {
       const pick = (list) => list[(i * 7 + points.length) % list.length];
       if (i < frames.length - 1) {
@@ -5213,7 +5399,7 @@ function startBoard() {
     const r = radiusMm();
     const out = { positions: [], colors: [] };
     const frames = lineFrames(points);
-    const lift = (v, mm) => v.clone().normalize().multiplyScalar(1 + mm / r);
+    const lift = (v, mm) => onGround(v.clone().normalize(), 1 + mm / r);
     /* walk along the line in small steps, winding the coil */
     const steps = [];
     let travelled = 0;
@@ -5445,14 +5631,14 @@ function startBoard() {
       const dir = frame.ahead.clone().applyAxisAngle(frame.origin, angle);
       const axis = new THREE.Vector3().crossVectors(frame.origin, dir).normalize();
       const reach = Math.max(1.5, (lengthMm * j) / along);
-      return frame.origin.clone().applyAxisAngle(axis, reach / r).multiplyScalar(1.0018);
+      return onGround(frame.origin.clone().applyAxisAngle(axis, reach / r), 1.0018);
     };
     const wallAt = (i, j) => {
       const axis = new THREE.Vector3().crossVectors(frame.origin, frame.ahead).normalize();
       const v = j / along;
       const reach = Math.max(1.5, lengthMm * v);
       const tall = (2 + 7 * Math.sin(Math.min(1, v * 1.6) * Math.PI * 0.5) * (1 - v * 0.55)) * (i / across);
-      return frame.origin.clone().applyAxisAngle(axis, reach / r).multiplyScalar(1.0018 + tall / r);
+      return onGround(frame.origin.clone().applyAxisAngle(axis, reach / r), 1.0018 + tall / r);
     };
     for (const at of [groundAt, wallAt]) {
       for (let j = 0; j < along; j++) {
@@ -5496,7 +5682,7 @@ function startBoard() {
       const dir = flame.ahead.clone().applyAxisAngle(flame.origin, side * 2 * half);
       const axis = new THREE.Vector3().crossVectors(flame.origin, dir).normalize();
       const reach = Math.min(flame.reach, FLAME_RANGE_MM * v);
-      const point = flame.origin.clone().applyAxisAngle(axis, reach / r).multiplyScalar(1 + (1 + v * 9 * rise) / r);
+      const point = onGround(flame.origin.clone().applyAxisAngle(axis, reach / r), 1 + (1 + v * 9 * rise) / r);
       places.setXYZ(i, point.x, point.y, point.z);
     });
     places.needsUpdate = true;
@@ -5973,7 +6159,7 @@ function startBoard() {
     const r = radiusMm();
     const spot = piece.up.clone().addScaledVector(piece.forward, ((entering ? 1 : -1) * PIECE_LENGTH_MM * 0.5) / r).normalize();
     const mouth = new THREE.Group();
-    mouth.position.copy(spot);
+    mouth.position.copy(spot).multiplyScalar(1 + groundLift(spot));
     mouth.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), spot);
     mouth.scale.setScalar(1 / r);
     const hole = new THREE.Mesh(tunnelParts.hole, tunnelParts.holePaint);
@@ -6415,7 +6601,7 @@ function startBoard() {
       return dot;
     });
     mesh.add(stalk, cap);
-    mesh.position.copy(spot);
+    mesh.position.copy(spot).normalize().multiplyScalar(1 + groundLift(spot));
     mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), spot);
     mesh.rotateY(Math.random() * Math.PI * 2);
     const tag = document.createElement("div");
