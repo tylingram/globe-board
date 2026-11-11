@@ -752,14 +752,14 @@ const SELF_DESTRUCT_BANDS = [
 ];
 const TUMBLE_MM = 50;                /* how far a kicked ball rolls */
 const TUMBLE_SPEED_MM = 20;          /* per second */
-const TUMBLE_DAMAGE = 35;
+const TUMBLE_DAMAGE = 20;
 const TUMBLE_KNOCK_MM = 20;
 const ICE_DAMAGE = 35;               /* per turn, for a piece touching the ice */
 const ICE_COLD_DAMAGE = 25;          /* the same, with Ice Cold */
 const HEALING_PER_TURN = 2;
 const GHOST_MM = 50;                 /* how far a Post Mortem Nen ghost drifts */
 const GHOST_SPEED_MM = 30;           /* per second */
-const GHOST_DAMAGE = 20;             /* to each enemy piece it passes through */
+const GHOST_DAMAGE = 30;             /* to each enemy piece it passes through */
 const GHOST_REACH_MM = 12;           /* centre to centre: it is twice a piece's size */
 const GHOST_FADE_SECONDS = 0.4;
 const WILL_HP = 10;                  /* extra HP the closest teammate gets from a dying One for All piece */
@@ -779,19 +779,19 @@ const PERKS = [
   { id: "railroad", type: "move", name: "Rail Road", text: "Lays track behind the piece as it moves, through its tunnels too. Any piece whose move lands on track can then ride anywhere on the joined-up railroad, at 30 mm/s, but can't stop on track inside rock. Can't be used two turns in a row.", cools: true },
   { id: "barbed", type: "move", name: "Barbed Wire", text: "Lays barbed wire behind the piece as it moves. Any enemy piece that touches it takes 10 damage, once per stretch of wire each turn; your own side can cross it safely. Can't be used two turns in a row.", cools: true },
   { id: "melee", type: "move", name: "Melee", text: "Running into a piece does 15 damage and knocks it 10 mm away. Can't be used two turns in a row.", cools: true },
-  { id: "flame", type: "fire", name: "Flame Thrower", text: "Range drops to 75 mm. Instead of a shell, it breathes a plume of flame toward the spot: a 7\u00b0 slice reaching 75 mm. Anything that touches it takes 20 damage, then 5 more at the start of each of the next 2 turns. Replaces the other cannon perks." },
+  { id: "flame", type: "fire", name: "Flame Thrower", text: "Breathes a plume of flame as well as firing the cannon. Aim the flame first, within 75 mm, then pick a cannon shot too if you want one. The plume is a 7\u00b0 slice reaching 75 mm. Anything that touches it takes 20 damage, then 5 more at the start of each of the next 2 turns." },
   { id: "steel", type: "fire", passive: true, name: "Steel", text: "Always on: when this piece's cannon kills an enemy piece, it takes that piece's perks as well." },
   { id: "puddle", type: "fire", name: "Puddle", text: "The shell leaves a puddle of water across its blast. When the ice reaches a puddle, the whole puddle freezes at once." },
   { id: "big", type: "fire", name: "Big shell", text: "A direct hit, within 5 mm, still does 50. Around it the blast rings are twice as wide but do half the damage: 25 within 10 mm, 13 within 20 mm, 5 within 35 mm. Also doubles a web." },
   { id: "icecold", type: "passive", passive: true, name: "Ice Cold", text: "The ice costs this piece 25 HP a turn instead of 35." },
   { id: "oneforall", type: "passive", passive: true, name: "One for All", text: "When a teammate dies, this piece takes any of its perks it lacks. When this piece dies, the closest teammate gets its perks and 10 HP." },
-  { id: "nen", type: "passive", passive: true, name: "Post Mortem Nen", text: "When an enemy kills this piece, its ghost rises, twice as big, and drifts 50 mm toward the piece that killed it, straight through pieces and rock. Every enemy piece it passes through takes 20 damage. Then it fades away." },
+  { id: "nen", type: "passive", passive: true, name: "Post Mortem Nen", text: "When an enemy kills this piece, its ghost rises, twice as big, and drifts 50 mm toward the piece that killed it, straight through pieces and rock. Every enemy piece it passes through takes 30 damage. Then it fades away." },
   { id: "healing", type: "passive", passive: true, name: "Healing", text: "Regains 2 HP at the end of every turn." },
   { id: "foresight", type: "passive", passive: true, name: "Foresight", text: "Shows you which rock turns to ice first, and plants a flag, seen only by your side, near the last land the ice will reach." },
   { id: "easy", type: "passive", passive: true, name: "Easy route", text: "Resets this piece's medals of valor to 1, but from then on every medal earns a perk." },
   { id: "recuperate", type: "ball", name: "Recuperate", text: "Switch on, then roll into a ball: restores 5 HP." },
   { id: "selfdestruct", type: "ball", name: "Self Destruct", text: "Switch on, then roll into a ball: 2 seconds later the piece explodes and dies. 50 damage within 15 mm, 40 within 25, 30 within 35, 20 within 45 mm." },
-  { id: "rolling", type: "ball", cools: 2, name: "Rolling Destruction", text: "Switch on, then roll into a ball: if an enemy shell or flame hits the ball this turn, it rolls 50 mm toward the piece that fired. Anything it rolls into takes 35 damage and is knocked 20 mm. Then it needs 2 turns before it can do that again." },
+  { id: "rolling", type: "ball", cools: 2, name: "Rolling Destruction", text: "Switch on, then roll into a ball: if an enemy shell or flame hits the ball this turn, it rolls 50 mm toward the piece that fired. Anything it rolls into takes 20 damage and is knocked 20 mm. Then it needs 2 turns before it can do that again." },
   { id: "igloo", type: "ball", cools: 2, name: "Igloo", text: "Switch on, then roll into a ball: if the ice catches it this turn, the ball rolls itself off the ice, unharmed. Then it needs 2 turns before it can do that again." },
   { id: "darkarts", type: "ball", cools: 2, name: "Dark Arts", text: "Switch on, then roll up on a fallen teammate's blood splatter to bring that piece back at 25 HP, with no perks. Then it needs 2 turns before it can do that again." },
   { id: "pain", type: "ball", name: "Pain packet", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell." },
@@ -2271,7 +2271,9 @@ function startBoard() {
   };
   const painReady = (piece) => hasPerk(piece, "pain") && piece.painTurn === turnState.number;
   const perkOn = (piece, id) => piece.perksOn.has(id) || (id === "tunnel" && piece.perks.includes("tunnel"));
-  const fireReach = (piece) => (perkOn(piece, "flame") ? FLAME_RANGE_MM : FIRE_RANGE_MM);
+  /* The flame is aimed first, when it's on; every other fire click is the cannon. */
+  const aimingFlame = (piece) => !!piece && perkOn(piece, "flame") && action === "fire" && orderLeg === "first";
+  const fireReach = (piece) => (aimingFlame(piece) ? FLAME_RANGE_MM : FIRE_RANGE_MM);
   const slowed = (piece) => turnState.number >= piece.slowFrom && turnState.number <= piece.slowTurn;
   const moveReach = (piece) => (slowed(piece) ? WEB_MOVE_MM : MOVE_RANGE_MM);
   const crawlSpeed = (piece) => (piece.ride ? RAIL_SPEED_MM : CRAWL_SPEED_MM * (perkOn(piece, "double") ? 2 : 1) * (slowed(piece) ? 0.5 : 1));
@@ -2429,7 +2431,9 @@ function startBoard() {
     const packed = selected && painReady(selected) ? "Pain packet: firing gives two shots this turn. " : "";
     const webbed = selected && slowed(selected) ? `Caught in a web: ${WEB_MOVE_MM} mm at half speed this turn. ` : "";
     const order = medals + packed + webbed + (action === "fire"
-      ? (selected && perkOn(selected, "flame") ? "Click inside the red circle to aim the flame." : "Click inside the red circle to choose where the shell lands.")
+      ? (aimingFlame(selected) ? "Click inside the red circle to aim the flame. Then you can pick a cannon shot too."
+        : orderLeg === "afterFlame" ? "Flame aimed. Click inside the red circle for a cannon shot too, or deselect to skip it."
+        : "Click inside the red circle to choose where the shell lands.")
       : "Click inside the circle to set where this piece goes. Click the piece itself to cancel its order.");
     const resting = [];
     if (selected && !canFire(selected)) resting.push("cannon");
@@ -2521,17 +2525,19 @@ function startBoard() {
     piece.aimMark = null;
     removeMark(piece.aimMark2);
     piece.aimMark2 = null;
-    const target = piece.plan || piece.fire;
+    removeMark(piece.flameMark);
+    piece.flameMark = null;
+    const target = piece.plan || piece.fire || piece.flameAt;
     if (target && (piece.team === localTeam || moving)) {
       const r = radiusMm();
       const width = markWidthMm();
       piece.arrow = new THREE.Mesh(
         arrowGeometry(piece.up, target, 6 / r, width / 2 / r, (width * 3.2) / r),
-        piece.fire ? blastPaint : arrowPaint[piece.team]
+        piece.fire || piece.flameAt ? blastPaint : arrowPaint[piece.team]
       );
       globe.add(piece.arrow);
       if (piece.fire) {
-        piece.aimMark = perkOn(piece, "flame") ? flamePreview(piece.up, piece.fire) : blastMark(piece.fire, shellMods(piece));
+        piece.aimMark = blastMark(piece.fire, shellMods(piece));
         globe.add(piece.aimMark);
       }
       const extra = (from, to, paint) => {
@@ -2561,8 +2567,12 @@ function startBoard() {
       }
       if (piece.fire2) {
         extra(piece.up, piece.fire2, blastPaint);
-        piece.aimMark2 = perkOn(piece, "flame") ? flamePreview(piece.up, piece.fire2) : blastMark(piece.fire2, shellMods(piece));
+        piece.aimMark2 = blastMark(piece.fire2, shellMods(piece));
         globe.add(piece.aimMark2);
+      }
+      if (piece.flameAt) {
+        piece.flameMark = flamePreview(piece.up, piece.flameAt);
+        globe.add(piece.flameMark);
       }
     } else if (piece.roll && piece.team === localTeam) {
       const r = radiusMm();
@@ -2698,8 +2708,6 @@ function startBoard() {
       piece.perksOn.delete(id);
     } else {
       piece.perksOn.add(id);
-      if (id === "flame") ["web", "pierce", "big"].forEach((other) => piece.perksOn.delete(other));
-      if (["web", "pierce", "big"].includes(id)) piece.perksOn.delete("flame");
     }
     if (PERKS.find((perk) => perk.id === id).type === "ball") {
       drawPerks();
@@ -2713,7 +2721,7 @@ function startBoard() {
   }
 
   function clearOrders(piece) {
-    piece.plan = piece.plan2 = piece.decoyPlan = piece.fire = piece.fire2 = null;
+    piece.plan = piece.plan2 = piece.decoyPlan = piece.fire = piece.fire2 = piece.flameAt = null;
     piece.railPath = null;
     piece.roll = false;
     drawArrow(piece);
@@ -3058,7 +3066,7 @@ function startBoard() {
       firedTurn: -1, rolledTurn: -1,
       hp: PIECE_HP, kick: 0,
       plan2: null, decoyPlan: null, extraArrows: [], perks: [], perksOn: new Set(), perkTurn: {}, slowFrom: 0, slowTurn: -1, shove: null,
-      fire2: null, aimMark2: null, painTurn: -1, medals: 0, boom: null, tumble: null,
+      fire2: null, aimMark2: null, flameAt: null, flameMark: null, painTurn: -1, medals: 0, boom: null, tumble: null,
       decoy: false, source: null, digging: false,
       bodyDepth: mesh.children[0].position.z,
       clock: Math.random(),
@@ -3371,16 +3379,14 @@ function startBoard() {
           if (hasPerk(piece, "pierce") && (nearest.hp <= 25 || Math.random() < 0.2)) piece.perksOn.add("pierce");
           if (hasPerk(piece, "big") && Math.random() < 0.3 && [landing, piece.fire2].every(wideSafe)) piece.perksOn.add("big");
           if (hasPerk(piece, "puddle") && Math.random() < (ice.rock ? 0.5 : 0.2)) piece.perksOn.add("puddle");
-          /* Up close, it may breathe fire instead, if no teammate is in the way. */
-          if (hasPerk(piece, "flame") && gap <= FLAME_RANGE_MM - 5 && Math.random() < 0.5) {
+          /* Up close, it breathes fire as well, if no teammate is in the way. */
+          if (hasPerk(piece, "flame") && gap <= FLAME_RANGE_MM - 5) {
             const frame = flameFrame(piece.up, nearest.up);
             const plume = { ...frame, shooter: piece };
             const friendly = pieces.some((p) => p.team === piece.team && p !== piece && !p.decoy && inFlame(plume, p));
             if (!friendly) {
-              ["web", "pierce", "big"].forEach((id) => piece.perksOn.delete(id));
               piece.perksOn.add("flame");
-              piece.fire = nearest.up.clone();
-              if (piece.fire2 && mmBetween(piece.up, piece.fire2) > FLAME_RANGE_MM) piece.fire2 = null;
+              piece.flameAt = nearest.up.clone();
             }
           }
         }
@@ -3548,7 +3554,15 @@ function startBoard() {
         piece.fire2 = spot;
         drawArrow(piece);
       } else {
-        clearOrders(piece);
+        if (orderLeg !== "afterFlame") clearOrders(piece);
+        if (orderLeg === "first" && perkOn(piece, "flame")) {
+          piece.flameAt = spot;
+          drawArrow(piece);
+          orderLeg = "afterFlame";
+          drawCircle();
+          say(orderMessage());
+          return;
+        }
         setAim(piece, spot);
         if (painReady(piece)) {
           orderLeg = "secondShot";
@@ -3847,7 +3861,7 @@ function startBoard() {
     }
     for (const piece of pieces.filter((p) => p.decoyPlan)) sendDecoy(piece);
     const movers = pieces.filter((p) => p.plan);
-    const gunners = pieces.filter((p) => p.fire);
+    const gunners = pieces.filter((p) => p.fire || p.flameAt);
     for (const piece of movers) {
       piece.move = { facing: false };
       piece.moveStart = { up: piece.up.clone(), forward: piece.forward.clone(), curl: piece.curl };
@@ -3910,7 +3924,7 @@ function startBoard() {
       if (!shot || piece.curl > 0) continue;
       if (shot.stage === "aim") {
         if (shot.second) shot.time += seconds;   /* the turn counts toward its 1 second */
-        const facing = turnToward(piece, piece.fire, seconds);
+        const facing = turnToward(piece, piece.flameAt || piece.fire, seconds);
         poseOnSphere(piece);
         piece.clock += TURN_STEPS * seconds;
         poseCrawl(piece, facing || calm.matches ? 0 : 1);
@@ -3928,7 +3942,7 @@ function startBoard() {
         const charged = Math.min(1, shot.time / CHARGE_SECONDS);
         shot.glow.scale.setScalar(0.005 + 0.075 * charged);
         if (charged === 1) {
-          if (perkOn(piece, "flame")) {
+          if (piece.flameAt) {
             breathe(piece);
             sound.flame();
           } else {
@@ -4099,7 +4113,7 @@ function startBoard() {
     if (piece.shot && piece.shot.glow) piece.mesh.remove(piece.shot.glow);
     if (piece.boom && piece.boom.glow) piece.mesh.remove(piece.boom.glow);
     piece.boom = piece.tumble = null;
-    piece.shot = piece.move = piece.plan = piece.fire = piece.fire2 = null;
+    piece.shot = piece.move = piece.plan = piece.fire = piece.fire2 = piece.flameAt = null;
     piece.roll = false;
     drawArrow(piece);
     globe.remove(piece.mesh);
@@ -5276,7 +5290,7 @@ function startBoard() {
   function breathe(piece) {
     piece.mesh.remove(piece.shot.glow);
     piece.shot.glow.material.dispose();
-    const frame = flameFrame(piece.up, piece.fire);
+    const frame = flameFrame(piece.up, piece.flameAt);
     const flame = { ...frame, shooter: piece, caught: new Set(), age: 0, reach: 0, medalled: false };
     flame.mesh = new THREE.Mesh(flameGeometry(frame, FLAME_RANGE_MM), fireMaterial());
     flame.mesh.material.uniforms.uGrow.value = 0;
@@ -5284,11 +5298,9 @@ function startBoard() {
     globe.add(flame.mesh, flame.embers);
     flames.push(flame);
     piece.kick = 1;
-    piece.shot = null;
-    const next = piece.fire2;
-    piece.fire2 = null;
-    setAim(piece, next);
-    if (next) piece.shot = { stage: "aim", time: 0, glow: null, second: true };
+    piece.flameAt = null;
+    piece.shot = piece.fire ? { stage: "aim", time: 0, glow: null, second: true } : null;   /* then the cannon, if aimed */
+    drawArrow(piece);
     scorch();
   }
 
@@ -6595,7 +6607,7 @@ function startBoard() {
   /* What isn't game state: meshes and labels, the motion of a turn in progress, and
      links to other things, which are sent as ids instead. */
   const PIECE_SKIP = new Set(["mesh", "tag", "arrow", "aimMark", "aimMark2", "extraArrows", "legs", "antennae", "curlParts",
-    "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx",
+    "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "flameMark",
     "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt"]);
   function packPiece(piece) {
     const out = {};
@@ -6608,7 +6620,7 @@ function startBoard() {
     out.burnBy = piece.burnBy && pieces.includes(piece.burnBy) ? piece.burnBy.id : null;   /* a dead shooter gets no credit */
     return out;
   }
-  const ORDER_KEYS = ["plan", "plan2", "decoyPlan", "fire", "fire2", "railPath"];
+  const ORDER_KEYS = ["plan", "plan2", "decoyPlan", "fire", "fire2", "flameAt", "railPath"];
   const packOrders = (piece) => {
     const out = { roll: !!piece.roll, perksOn: [...piece.perksOn] };
     for (const key of ORDER_KEYS) out[key] = piece[key] ? packValue(piece[key]) : null;
