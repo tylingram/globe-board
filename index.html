@@ -625,9 +625,9 @@ const GROUND_SHADER = `
    slope down to the base line, or the same upside down for a valley. Where hills meet,
    the higher one wins; hills and valleys never touch, so every slope stays between
    1 mm in 3 and 1 mm in 10. The same sum runs here and in the ground shader. */
-const TERRAIN_MAX = 240;       /* lumps, spurs and valley stretches on the globe, at most */
+const TERRAIN_MAX = 320;       /* lumps, spurs and valley stretches on the globe, at most */
 const TERRAIN_LIMIT_MM = 10;   /* the highest hill and the deepest valley */
-const TERRAIN_HIGH_SHARE = 0.25;   /* of the globe above the base line */
+const TERRAIN_HIGH_SHARE = 0.35;   /* of the globe above the base line */
 const TERRAIN_LOW_SHARE = 0.15;    /* and below it; the rest stays level */
 const TERRAIN_STEEP = 1 / 3;       /* slopes run between 1 mm in 3 */
 const TERRAIN_GENTLE = 1 / 10;     /* and 1 mm in 10 */
@@ -3222,7 +3222,117 @@ function startBoard() {
     topShape.setAttribute("normal", new THREE.Float32BufferAttribute(tops.normals, 3));
     cliffTopMesh.geometry.dispose();
     cliffTopMesh.geometry = topShape;
+    layOutPlants();
     needsDraw = true;
+  }
+
+  /* ---------- Grass and small plants ----------
+     Just for looks: tufts of grass and little leafy plants scattered over the ground,
+     thick on level ground and in the valleys, thin on the stony hills, never on rock.
+     Two instanced meshes, so thousands cost little. Seeded like the rocks. Where the ice
+     reaches, they frost over. Sizes in mm. */
+  const plantShapes = (() => {
+    const blades = [];
+    for (let k = 0; k < 7; k++) {
+      const turn = (k / 7) * Math.PI * 2 + (k % 2) * 0.4;
+      const out = 0.35 + (k % 3) * 0.25;
+      const bx = Math.cos(turn) * out, bz = Math.sin(turn) * out;
+      const side = [-Math.sin(turn) * 0.22, Math.cos(turn) * 0.22];
+      const tall = 1.9 + ((k * 37) % 10) * 0.16;
+      const lean = 0.5 + (k % 2) * 0.35;
+      blades.push(bx - side[0], 0, bz - side[1], bx + side[0], 0, bz + side[1], bx + Math.cos(turn) * lean, tall, bz + Math.sin(turn) * lean);
+    }
+    const grass = new THREE.BufferGeometry();
+    grass.setAttribute("position", new THREE.Float32BufferAttribute(blades, 3));
+    grass.computeVertexNormals();
+    const leaves = [];
+    for (let k = 0; k < 5; k++) {
+      const turn = (k / 5) * Math.PI * 2;
+      const c = Math.cos(turn), sn = Math.sin(turn);
+      const at = (along, across, up) => [c * along - sn * across, up, sn * along + c * across];
+      const tip = at(2.1, 0, 0.9), left = at(1.0, 0.55, 0.75), right = at(1.0, -0.55, 0.75), base = at(0.1, 0, 0.25);
+      leaves.push(...base, ...left, ...tip, ...base, ...tip, ...right);
+    }
+    leaves.push(-0.12, 0, 0, 0.12, 0, 0, 0, 1.2, 0);   /* a little stem in the middle */
+    const plant = new THREE.BufferGeometry();
+    plant.setAttribute("position", new THREE.Float32BufferAttribute(leaves, 3));
+    plant.computeVertexNormals();
+    return { grass, plant };
+  })();
+  const plantPaint = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+  const plants = { grass: null, plant: null, spots: [] };
+  const PLANT_GREENS = ["#5f8a2e", "#6f9a37", "#4f7a28", "#7fa443", "#58803a"];
+  const PLANT_FROST = new THREE.Color(linear("#dcefff"));
+  function layOutPlants() {
+    for (const kind of ["grass", "plant"]) {
+      if (plants[kind]) { globe.remove(plants[kind]); plants[kind].dispose(); plants[kind] = null; }
+    }
+    const rand = seededRandom((rockSeed * 7919 + 4111) >>> 0);
+    const r = radiusMm();
+    const area = 4 * Math.PI * r * r;
+    const want = { grass: Math.min(9000, Math.round(area / 110)), plant: Math.min(2500, Math.round(area / 520)) };
+    const matrix = new THREE.Matrix4();
+    const turn = new THREE.Quaternion();
+    const yUp = new THREE.Vector3(0, 1, 0);
+    const paint = new THREE.Color();
+    plants.spots = [];
+    for (const kind of ["grass", "plant"]) {
+      const mesh = new THREE.InstancedMesh(plantShapes[kind], plantPaint, want[kind]);
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      let made = 0;
+      for (let tries = 0; tries < want[kind] * 4 && made < want[kind]; tries++) {
+        const y = rand() * 2 - 1;
+        const a = rand() * Math.PI * 2;
+        const ring = Math.sqrt(1 - y * y);
+        const up = new THREE.Vector3(ring * Math.cos(a), y, ring * Math.sin(a));
+        const height = elevation(up);
+        /* thinner the higher the ground: bare stone up top */
+        const keep = height > 0 ? Math.max(0.12, 1 - height / 7) : 1;
+        if (rand() > keep) continue;
+        if (rockGap({ up, forward: tangentPair(up)[0], curl: 1 }) < 1.5) continue;
+        const size = (kind === "grass" ? 0.7 + rand() * 0.7 : 0.6 + rand() * 0.6) / r;
+        turn.setFromUnitVectors(yUp, up).multiply(new THREE.Quaternion().setFromAxisAngle(yUp, rand() * Math.PI * 2));
+        matrix.compose(up.clone().multiplyScalar(1 + height / r), turn, new THREE.Vector3(size, size, size));
+        mesh.setMatrixAt(made, matrix);
+        const green = PLANT_GREENS[Math.floor(rand() * PLANT_GREENS.length)];
+        paint.set(linear(green));
+        if (height < 0) paint.multiplyScalar(0.8 + 0.2 * (1 + height / 10));   /* darker down in the valleys */
+        mesh.setColorAt(made, paint);
+        plants.spots.push({ mesh, index: made, up, green: paint.clone(), frosted: false });
+        made++;
+      }
+      mesh.count = made;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.instanceMatrix.needsUpdate = true;
+      plants[kind] = mesh;
+      globe.add(mesh);
+    }
+    plants.frostReach = -Infinity;
+    frostPlants();
+  }
+  /* Plants the ice has reached turn white with frost. */
+  function frostPlants() {
+    if (!ice.rock || ice.reach < plants.frostReach + 0.5) return;
+    plants.frostReach = ice.reach;
+    const touched = new Set();
+    for (const spot of plants.spots) {
+      if (spot.frosted || iceDistance(spot.up) > ice.reach) continue;
+      spot.frosted = true;
+      spot.mesh.setColorAt(spot.index, PLANT_FROST);
+      touched.add(spot.mesh);
+    }
+    for (const mesh of touched) mesh.instanceColor.needsUpdate = true;
+  }
+  function thawPlants() {
+    const touched = new Set();
+    for (const spot of plants.spots) {
+      if (!spot.frosted) continue;
+      spot.frosted = false;
+      spot.mesh.setColorAt(spot.index, spot.green);
+      touched.add(spot.mesh);
+    }
+    for (const mesh of touched) mesh.instanceColor.needsUpdate = true;
+    plants.frostReach = -Infinity;
   }
 
   /* Hills first, until about a quarter of the globe is raised, then valleys until about
@@ -3346,7 +3456,7 @@ function startBoard() {
     terrain.length = 0;
     for (const [sign, target, list, other, most, make] of [[1, TERRAIN_HIGH_SHARE, high, low, Math.round(TERRAIN_MAX * 0.6), hill], [-1, TERRAIN_LOW_SHARE, low, high, TERRAIN_MAX, valley]]) {
       let covered = 0;
-      for (let tries = 0; tries < 500 && covered / count < target && terrain.length < most; tries++) {
+      for (let tries = 0; tries < (sign > 0 ? 600 : 4000) && covered / count < target && terrain.length < most; tries++) {
         const parts = make();
         if (terrain.length + parts.length > most) continue;
         if (parts.some((f) => f.a.angleTo(f.b) / 2 + (f.top + f.width) / r > Math.PI * 0.3)) continue;   /* too big for this globe */
@@ -4930,6 +5040,7 @@ function startBoard() {
     if (ice.reach < ice.goal) {
       ice.reach = Math.min(ice.goal, ice.reach + ICE_SPEED_MM * seconds);
       iceReach.value = ice.reach;
+      frostPlants();
     }
     if (puddles.length) freezePuddles();
     freezeCaught();
@@ -5188,6 +5299,7 @@ function startBoard() {
   const puddleIce = (spot) => Math.min(Infinity, ...puddles.filter((q) => q.frozen).map((q) => mmBetween(q.spot, spot) - q.radius));
 
   function clearIce() {
+    thawPlants();
     ice.rock = null;
     ice.future = null;
     showLastLand();
