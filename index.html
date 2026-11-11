@@ -489,6 +489,11 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
     </section>
 
     <section class="group">
+      <span class="label">Hills and valleys</span>
+      <p class="note">The ground rises up to 10 mm and dips down to 10 mm, shown by contour lines every 1 mm (a darker one every 5 mm). A cannon reaches 100 mm plus the shooter's height minus the target's: from a 10 mm hill it reaches 110 mm onto level ground and 120 mm into a 10 mm valley, but only 90 mm from level ground up onto that hill. The flame's reach stays 75 mm.</p>
+    </section>
+
+    <section class="group">
       <span class="label">The ice</span>
       <p class="note">After turn 7 a random rock turns to ice. Every turn after that the ice spreads: by default 22 mm a turn while it covers under half the globe, 18 mm up to 80%, then 14 mm (set with the Ice spread sliders). Any piece it reaches, or that moves onto it, takes 35 damage, once a turn, and freezes if that leaves it at 0. The pale band shows where it will reach next. In the end it covers the whole sphere.</p>
     </section>
@@ -615,6 +620,74 @@ const GROUND_SHADER = `
   }
 `;
 
+/* ---------- Hills and valleys ----------
+   Each feature is a level top (a dome, or a ridge along a short arc) with a straight
+   slope down to the base line, or the same upside down for a valley. Where hills meet,
+   the higher one wins; hills and valleys never touch, so every slope stays between
+   1 mm in 3 and 1 mm in 10. The same sum runs here and in the ground shader. */
+const TERRAIN_MAX = 40;        /* hills, ridges and valleys on the globe, at most */
+const TERRAIN_LIMIT_MM = 10;   /* the highest hill and the deepest valley */
+const TERRAIN_HIGH_SHARE = 0.25;   /* of the globe above the base line */
+const TERRAIN_LOW_SHARE = 0.15;    /* and below it; the rest stays level */
+const TERRAIN_STEEP = 1 / 3;       /* slopes run between 1 mm in 3 */
+const TERRAIN_GENTLE = 1 / 10;     /* and 1 mm in 10 */
+const terrainUniforms = {
+  uTerrainA: { value: Array.from({ length: TERRAIN_MAX }, () => new THREE.Vector4()) },   /* start xyz, level top radius mm */
+  uTerrainB: { value: Array.from({ length: TERRAIN_MAX }, () => new THREE.Vector4()) },   /* end xyz, height mm */
+  uTerrainW: { value: new Array(TERRAIN_MAX).fill(1) },                                    /* slope width mm */
+  uTerrainCount: { value: 0 },
+};
+const TERRAIN_GLSL = `
+  #define TERRAIN_MAX ${TERRAIN_MAX}
+  uniform vec4 uTerrainA[TERRAIN_MAX];
+  uniform vec4 uTerrainB[TERRAIN_MAX];
+  uniform float uTerrainW[TERRAIN_MAX];
+  uniform int uTerrainCount;
+  /* Angle from p to the arc a-b (a single point when a = b). */
+  float arcAngle(vec3 p, vec3 a, vec3 b) {
+    float toA = acos(clamp(dot(p, a), -1.0, 1.0));
+    if (dot(a, b) > 0.999999) return toA;
+    vec3 n = normalize(cross(a, b));
+    vec3 q = p - n * dot(p, n);
+    if (dot(cross(a, q), n) >= 0.0 && dot(cross(q, b), n) >= 0.0) return asin(clamp(abs(dot(p, n)), 0.0, 1.0));
+    return min(toA, acos(clamp(dot(p, b), -1.0, 1.0)));
+  }
+  float terrainHeight(vec3 p, float radiusMm) {
+    float high = 0.0;
+    float low = 0.0;
+    for (int i = 0; i < TERRAIN_MAX; i++) {
+      if (i >= uTerrainCount) break;
+      float d = arcAngle(p, uTerrainA[i].xyz, uTerrainB[i].xyz) * radiusMm;
+      float h = uTerrainB[i].w * clamp(1.0 - (d - uTerrainA[i].w) / uTerrainW[i], 0.0, 1.0);
+      if (h > 0.0) high = max(high, h); else low = min(low, h);
+    }
+    return high + low;
+  }
+`;
+function arcAngle(p, a, b) {
+  const toA = Math.acos(Math.min(1, Math.max(-1, p.dot(a))));
+  if (a.dot(b) > 0.999999) return toA;
+  const n = new THREE.Vector3().crossVectors(a, b).normalize();
+  const q = p.clone().addScaledVector(n, -p.dot(n));
+  if (new THREE.Vector3().crossVectors(a, q).dot(n) >= 0 && new THREE.Vector3().crossVectors(q, b).dot(n) >= 0) {
+    return Math.asin(Math.min(1, Math.abs(p.dot(n))));
+  }
+  return Math.min(toA, Math.acos(Math.min(1, Math.max(-1, p.dot(b)))));
+}
+function featureHeight(feature, up, radiusMm) {
+  const d = arcAngle(up, feature.a, feature.b) * radiusMm;
+  return feature.height * Math.min(1, Math.max(0, 1 - (d - feature.top) / feature.width));
+}
+function terrainAt(features, up, radiusMm) {
+  let high = 0;
+  let low = 0;
+  for (const feature of features) {
+    const h = featureHeight(feature, up, radiusMm);
+    if (h > 0) high = Math.max(high, h); else low = Math.min(low, h);
+  }
+  return high + low;
+}
+
 const GROUND_PAINT = { name: "ground", low: "#5f4228", high: "#8d6a44", patchLow: "#3f5a24", patchHigh: "#7b9440" };
 const CLIFF_TOP_PAINT = { name: "cliff-top", low: "#a9aaa6", high: "#d6d5cd", patchLow: "#7f8384", patchHigh: "#a3a6a6" };
 
@@ -626,15 +699,17 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
   const material = new THREE.MeshStandardMaterial({ roughness: 0.95, metalness: 0 });
   material.extensions = { derivatives: true };
   material.customProgramCacheKey = () => colors.name;
+  const hills = colors.name === "ground";
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uRadiusMm = radiusMm;
     shader.uniforms.uIceReach = iceReach;
     shader.uniforms.uIceStep = iceStep;
+    if (hills) Object.assign(shader.uniforms, terrainUniforms);
     shader.vertexShader = shader.vertexShader
       .replace("#include <common>", "#include <common>\nvarying vec3 vBallPoint;\nattribute float aIceDist;\nvarying float vIceDist;")
       .replace("#include <begin_vertex>", "#include <begin_vertex>\nvBallPoint = position;\nvIceDist = aIceDist;");
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", "#include <common>\n" + GROUND_SHADER + "\nuniform float uIceReach;\nuniform float uIceStep;\nvarying float vIceDist;")
+      .replace("#include <common>", "#include <common>\n" + GROUND_SHADER + (hills ? TERRAIN_GLSL : "") + "\nuniform float uIceReach;\nuniform float uIceStep;\nvarying float vIceDist;")
       .replace("#include <color_fragment>", `
         #include <color_fragment>
         vec3 groundMm = normalize(vBallPoint) * uRadiusMm;
@@ -654,6 +729,22 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
         vec3 mossColor = mix(${literal(colors.patchLow)}, ${literal(colors.patchHigh)}, clamp(0.5 + tuft * 1.1 + blotch * 0.4, 0.0, 1.0));
         diffuseColor.rgb = mix(dirt, mossColor, moss);
 
+        /* Hills and valleys: higher ground a little lighter, lower a little darker, with
+           a contour line every 1 mm and a stronger one every 5 mm. */
+        float elevation = ${hills ? "terrainHeight(normalize(vBallPoint), uRadiusMm)" : "0.0"};
+        diffuseColor.rgb = mix(diffuseColor.rgb, ${literal("#c9a46a")}, clamp(elevation / 10.0, 0.0, 1.0) * 0.38);
+        diffuseColor.rgb = mix(diffuseColor.rgb, ${literal("#2a2f2a")}, clamp(-elevation / 10.0, 0.0, 1.0) * 0.45);
+        {
+          float rise = max(fwidth(elevation), 1e-5);
+          float slopeSeen = rise / mmPerPixel;
+          float level = floor(elevation + 0.5);
+          float offPixels = abs(elevation - level) / rise;
+          float bold = mod(level, 5.0) == 0.0 ? 1.0 : 0.0;
+          float line = (1.0 - smoothstep(0.5 + bold * 0.6, 1.3 + bold * 0.8, offPixels))
+            * step(0.5, abs(level)) * smoothstep(0.02, 0.05, slopeSeen);
+          diffuseColor.rgb = mix(diffuseColor.rgb, ${literal("#2e2114")}, line * (0.45 + bold * 0.25));
+        }
+
         /* Ice, in mm from its edge: below zero is frozen, and a pale band with a thin
            line marks where it reaches next. */
         float iceEdge = vIceDist - uIceReach;
@@ -667,7 +758,7 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
         diffuseColor.rgb = mix(diffuseColor.rgb, frost, frozen);
 
         /* Height in sphere radii, used only to shade the bumps. */
-        float groundHeight = (1.0 - frozen) * (clods * 0.9 + grit * 0.12 + moss * (0.5 + tuft * 0.5)) / uRadiusMm;
+        float groundHeight = ((1.0 - frozen) * (clods * 0.9 + grit * 0.12 + moss * (0.5 + tuft * 0.5)) + elevation * 1.6) / uRadiusMm;
       `)
       .replace("#include <roughnessmap_fragment>", `
         #include <roughnessmap_fragment>
@@ -695,7 +786,7 @@ const MAX_PIECES = 3;
 const BOT_HUDDLE_MM = 50;     /* a bot side starts with all its pieces this close together */
 const MOVE_RANGE_MM = 50;      /* radius of the move circle */
 const ROLL_SECONDS = 0.5;       /* to curl up, and again to uncurl */
-const FIRE_RANGE_MM = 100;     /* radius of the cannon circle */
+const FIRE_RANGE_MM = 100;     /* cannon range between two spots at the same height */
 const CHARGE_SECONDS = 1;      /* from facing the target to the shot */
 const SHELL_SPEED_MM = 120;    /* per second, along the ground */
 const SHELL_ARC = 0.3;         /* peak height as a share of the distance */
@@ -2433,7 +2524,7 @@ function startBoard() {
     const order = medals + packed + webbed + (action === "fire"
       ? (aimingFlame(selected) ? "Click inside the red circle to aim the flame. Then you can pick a cannon shot too."
         : orderLeg === "afterFlame" ? "Flame aimed. Click inside the red circle for a cannon shot too, or deselect to skip it."
-        : "Click inside the red circle to choose where the shell lands.")
+        : `Click inside the red area to choose where the shell lands. This piece stands ${heightText(elevation(orderFrom()))}: higher ground reaches farther.`)
       : "Click inside the circle to set where this piece goes. Click the piece itself to cancel its order.");
     const resting = [];
     if (selected && !canFire(selected)) resting.push("cannon");
@@ -2451,6 +2542,31 @@ function startBoard() {
     transparent: true, opacity: 0.95, depthWrite: false, side: THREE.DoubleSide,
   }));
   circleFill.visible = circleEdge.visible = false;
+  const plainFill = circleFill.material;
+  const plainEdge = circleEdge.material;
+  const rangeUniforms = { uCenter: { value: new THREE.Vector3(0, 1, 0) }, uBase: { value: FIRE_RANGE_MM }, uEdge: { value: 1 }, uRadiusMm: groundRadius };
+  /* Every spot whose distance is within 100 mm plus the shooter's height minus its own. */
+  function rangePaint(edge) {
+    const paint = new THREE.MeshBasicMaterial({ transparent: true, opacity: edge ? 0.95 : 0.2, depthWrite: false, side: THREE.DoubleSide });
+    paint.extensions = { derivatives: true };
+    paint.customProgramCacheKey = () => (edge ? "range-edge" : "range-fill");
+    paint.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, terrainUniforms, rangeUniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vBallPoint;")
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvBallPoint = position;");
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "#include <common>\nvarying vec3 vBallPoint;\nuniform vec3 uCenter;\nuniform float uBase;\nuniform float uEdge;\nuniform float uRadiusMm;\n" + TERRAIN_GLSL)
+        .replace("#include <clipping_planes_fragment>", `
+          vec3 spot = normalize(vBallPoint);
+          float over = acos(clamp(dot(spot, uCenter), -1.0, 1.0)) * uRadiusMm - (uBase - terrainHeight(spot, uRadiusMm));
+          ${edge ? "if (abs(over) > uEdge * 0.5) discard;" : "if (over > 0.0) discard;"}
+          #include <clipping_planes_fragment>`);
+    };
+    return paint;
+  }
+  const rangeFill = rangePaint(false);
+  const rangeEdge = rangePaint(true);
   globe.add(circleFill, circleEdge);
   const arrowPaint = {};
   for (const team of Object.keys(TEAM_PAINT)) {
@@ -2467,12 +2583,28 @@ function startBoard() {
     const faking = orderLeg === "decoy";
     circleFill.material.color.copy(firing ? linear("#e02828") : faking ? linear("#7fd8ff") : linear("#12b5b0"));
     circleEdge.material.color.copy(firing ? linear("#c91f1f") : faking ? linear("#4fbdf0") : linear("#0a9a96"));
-    const range = (firing ? fireReach(selected) : moveReach(selected)) / radiusMm();
-    const edge = markWidthMm() / radiusMm();
     circleFill.geometry.dispose();
     circleEdge.geometry.dispose();
-    circleFill.geometry = capGeometry(orderFrom(), 0, range);
-    circleEdge.geometry = capGeometry(orderFrom(), range - edge, range);
+    if (firing && !aimingFlame(selected)) {
+      /* The cannon: shaped by the hills, so drawn wide and trimmed in the shader. */
+      circleFill.material = rangeFill;
+      circleEdge.material = rangeEdge;
+      rangeUniforms.uCenter.value.copy(orderFrom()).normalize();
+      rangeUniforms.uBase.value = FIRE_RANGE_MM + elevation(orderFrom());
+      rangeUniforms.uEdge.value = markWidthMm();
+      const widest = (FIRE_RANGE_MM + 2 * TERRAIN_LIMIT_MM + 2) / radiusMm();
+      circleFill.geometry = capGeometry(orderFrom(), 0, widest);
+      circleEdge.geometry = capGeometry(orderFrom(), 0, widest);
+    } else {
+      circleFill.material = plainFill;
+      circleEdge.material = plainEdge;
+      const range = (firing ? fireReach(selected) : moveReach(selected)) / radiusMm();
+      const edge = markWidthMm() / radiusMm();
+      circleFill.geometry = capGeometry(orderFrom(), 0, range);
+      circleEdge.geometry = capGeometry(orderFrom(), range - edge, range);
+    }
+    circleFill.material.color.copy(firing ? linear("#e02828") : faking ? linear("#7fd8ff") : linear("#12b5b0"));
+    circleEdge.material.color.copy(firing ? linear("#c91f1f") : faking ? linear("#4fbdf0") : linear("#0a9a96"));
     needsDraw = true;
   }
 
@@ -2809,7 +2941,7 @@ function startBoard() {
     title.textContent = piece.record && piece.record.name ? piece.record.name : "Your piece";
     const hp = document.createElement("span");
     hp.className = "tip-hp";
-    hp.textContent = `${piece.hp} HP`;
+    hp.textContent = `${piece.hp} HP \u00b7 ground ${heightText(elevation(piece.up))}`;
     pieceTip.append(title, hp);
     const owned = PERKS.filter((perk) => hasPerk(piece, perk.id));
     if (!owned.length) {
@@ -2909,8 +3041,94 @@ function startBoard() {
     topShape.setAttribute("normal", new THREE.Float32BufferAttribute(tops.normals, 3));
     cliffTopMesh.geometry.dispose();
     cliffTopMesh.geometry = topShape;
+    layOutTerrain();
     needsDraw = true;
   }
+
+  /* Hills first, until about a quarter of the globe is raised, then valleys until about
+     15% is lowered. Spots spread evenly over the globe measure the shares. Seeded like
+     the rocks, so every player online gets the same hills. */
+  const terrain = [];
+  function layOutTerrain() {
+    const rand = seededRandom((rockSeed * 2654435761 + 977) >>> 0);
+    const r = radiusMm();
+    const grow = Math.max(1, r / 150);
+    const count = 6000;
+    const spots = [];
+    for (let i = 0; i < count; i++) {
+      const y = 1 - (2 * (i + 0.5)) / count;
+      const ring = Math.sqrt(1 - y * y);
+      const turn = i * Math.PI * (3 - Math.sqrt(5));
+      spots.push(new THREE.Vector3(Math.cos(turn) * ring, y, Math.sin(turn) * ring));
+    }
+    const high = new Float32Array(count);
+    const low = new Float32Array(count);
+    const share = (list) => list.reduce((n, h) => n + (Math.abs(h) > 0.05 ? 1 : 0), 0) / count;
+    const tops = Math.pow(grow, 1.5);   /* bigger globes get broader hills, not just more of them */
+    const randomUp = () => {
+      const y = rand() * 2 - 1;
+      const a = rand() * Math.PI * 2;
+      const ring = Math.sqrt(1 - y * y);
+      return new THREE.Vector3(ring * Math.cos(a), y, ring * Math.sin(a));
+    };
+    terrain.length = 0;
+    for (const [sign, target, list, other, most] of [[1, TERRAIN_HIGH_SHARE, high, low, Math.round(TERRAIN_MAX * 0.6)], [-1, TERRAIN_LOW_SHARE, low, high, TERRAIN_MAX]]) {
+      let covered = 0;
+      for (let tries = 0; tries < 600 && covered / count < target && terrain.length < most; tries++) {
+        const height = sign * (3 + rand() * (TERRAIN_LIMIT_MM - 3));
+        const slope = TERRAIN_GENTLE + rand() * (TERRAIN_STEEP - TERRAIN_GENTLE);
+        const width = Math.abs(height) / slope;
+        const top = (2 + rand() * 18) * tops;
+        const a = randomUp();
+        let b = a.clone();
+        if (rand() < (sign > 0 ? 0.4 : 0.5)) {
+          const [u, v] = tangentPair(a);
+          const turn = rand() * Math.PI * 2;
+          const toward = u.multiplyScalar(Math.cos(turn)).addScaledVector(v, Math.sin(turn));
+          const axis = new THREE.Vector3().crossVectors(a, toward).normalize();
+          b = a.clone().applyAxisAngle(axis, ((25 + rand() * 60) * Math.pow(grow, 1.2)) / r).normalize();
+        }
+        const feature = { a, b, top, width, height };
+        const reachOut = top + width + mmBetween(a, b) / 2;
+        if (reachOut > Math.PI * r * 0.3) continue;   /* too big for this globe */
+        /* Never touching a feature of the other kind, with a little level ground between. */
+        const near = Math.cos(Math.min(Math.PI, (top + width + 6 + mmBetween(a, b)) / r));
+        const touched = [];
+        let clash = false;
+        for (let i = 0; i < count && !clash; i++) {
+          if (spots[i].dot(a) < near) continue;
+          const d = arcAngle(spots[i], a, b) * r;
+          if (d > top + width + 4) continue;
+          if (other[i] !== 0) clash = true;
+          const h = featureHeight(feature, spots[i], r);
+          if (h !== 0) touched.push(i, h);
+        }
+        if (clash) continue;
+        let gained = 0;
+        for (let k = 0; k < touched.length; k += 2) if (Math.abs(list[touched[k]]) <= 0.05 && Math.abs(touched[k + 1]) > 0.05) gained++;
+        if ((covered + gained) / count > target + 0.03) continue;   /* overshoots: try a smaller one */
+        for (let k = 0; k < touched.length; k += 2) {
+          const i = touched[k];
+          list[i] = sign > 0 ? Math.max(list[i], touched[k + 1]) : Math.min(list[i], touched[k + 1]);
+        }
+        covered += gained;
+        terrain.push(feature);
+      }
+    }
+    terrainUniforms.uTerrainCount.value = terrain.length;
+    terrain.forEach((f, i) => {
+      terrainUniforms.uTerrainA.value[i].set(f.a.x, f.a.y, f.a.z, f.top);
+      terrainUniforms.uTerrainB.value[i].set(f.b.x, f.b.y, f.b.z, f.height);
+      terrainUniforms.uTerrainW.value[i] = f.width;
+    });
+    terrain.shares = { high: share(high), low: share(low) };
+  }
+  /* Height of the ground in mm above (or below) the base line. */
+  const elevation = (up) => terrainAt(terrain, up, radiusMm());
+  /* A cannon reaches 100 mm between spots at the same height, 1 mm farther for every
+     mm the target is below the shooter, and 1 mm less for every mm above. */
+  const cannonReach = (from, to) => FIRE_RANGE_MM + elevation(from) - elevation(to);
+  const heightText = (mm) => (Math.abs(mm) < 0.5 ? "level" : `${mm > 0 ? "+" : "\u2212"}${Math.abs(mm).toFixed(0)} mm`);
 
   /* The room between a piece and the nearest rock in mm. Below zero means touching. */
   function rockGap(pose) {
@@ -3352,14 +3570,14 @@ function startBoard() {
       }
 
       /* Under threat it may curl up, more readily when hurt. */
-      if (canRoll(piece) && gap <= FIRE_RANGE_MM && Math.random() < (piece.hp <= 25 ? style.rollHurt : style.roll)) {
+      if (canRoll(piece) && gap <= cannonReach(nearest.up, piece.up) && Math.random() < (piece.hp <= 25 ? style.rollHurt : style.roll)) {
         piece.roll = true;
         armBall(piece);
         continue;
       }
       if (gap <= BLAST_RADIUS_MM + 4) {
         piece.plan = spotToward(piece, heading.clone().negate(), 1, reach * 0.8);
-      } else if (canFire(piece) && gap <= FIRE_RANGE_MM - 8 && Math.random() < style.fire) {
+      } else if (canFire(piece) && gap <= cannonReach(piece.up, nearest.up) - 8 && Math.random() < style.fire) {
         /* A little scatter around where that piece is now. */
         const aimNear = (target) => {
           const side = heading.clone().applyAxisAngle(piece.up, Math.random() * Math.PI * 2);
@@ -3367,13 +3585,15 @@ function startBoard() {
           return target.up.clone().applyAxisAngle(axis, (Math.random() * 8) / radiusMm());
         };
         const wideSafe = (spot) => !spot || !pieces.some((p) => p.team === piece.team && !p.decoy && mmBetween(p.up, spot) <= BIG_RADIUS_MM);
-        const landing = aimNear(nearest);
-        if (safeTo(landing)) {
+        const inReach = (spot) => mmBetween(piece.up, spot) <= cannonReach(piece.up, spot);
+        let landing = aimNear(nearest);
+        if (!inReach(landing)) landing = nearest.up.clone();
+        if (safeTo(landing) && inReach(landing)) {
           piece.fire = landing;
           if (painReady(piece)) {
-            const other = enemies.find((e) => e !== nearest && mmBetween(piece.up, e.up) <= FIRE_RANGE_MM - 8) || nearest;
+            const other = enemies.find((e) => e !== nearest && mmBetween(piece.up, e.up) <= cannonReach(piece.up, e.up) - 8) || nearest;
             const second = aimNear(other);
-            if (safeTo(second)) piece.fire2 = second;
+            if (safeTo(second) && inReach(second)) piece.fire2 = second;
           }
           if (hasPerk(piece, "web") && Math.random() < 0.35) piece.perksOn.add("web");
           if (hasPerk(piece, "pierce") && (nearest.hp <= 25 || Math.random() < 0.2)) piece.perksOn.add("pierce");
@@ -3396,7 +3616,7 @@ function startBoard() {
         /* Toward that piece if it can, or any open direction if rocks are in the way. A
            survivor backs away from enemies too close, and sidesteps at shooting range. */
         const backing = gap < style.keepAway;
-        const sidestep = style.keepAway && !backing && gap <= FIRE_RANGE_MM;
+        const sidestep = style.keepAway && !backing && gap <= cannonReach(nearest.up, piece.up);
         const way = backing ? heading.clone().negate()
           : sidestep ? heading.clone().applyAxisAngle(piece.up, (Math.random() < 0.5 ? 1 : -1) * Math.PI / 2)
           : heading;
@@ -3675,8 +3895,11 @@ function startBoard() {
         say(idleMessage());
         return;
       }
-      const reach = orderLeg === "rail" ? Infinity : { move: moveReach(selected), fire: fireReach(selected), ball: -1 }[action];
-      if (distance <= reach) {
+      const inRange = orderLeg === "rail" ? true
+        : action === "move" ? distance <= moveReach(selected)
+        : action === "fire" ? distance <= (aimingFlame(selected) ? FLAME_RANGE_MM : cannonReach(orderFrom(), spot))
+        : false;
+      if (inRange) {
         giveOrder(selected, spot, distance);
         return;
       }
@@ -6507,7 +6730,7 @@ function startBoard() {
       /* The longer orders depend on rocks and distances, so they start over. */
       piece.plan2 = piece.decoyPlan = null;
       if (piece.plan && (!restsClear(piece.up, piece.plan) || mmBetween(piece.up, piece.plan) > moveReach(piece))) piece.plan = null;
-      if (piece.fire && mmBetween(piece.up, piece.fire) > FIRE_RANGE_MM) piece.fire = null;
+      if (piece.fire && mmBetween(piece.up, piece.fire) > cannonReach(piece.up, piece.fire)) piece.fire = null;
       drawArrow(piece);
     }
     if (bot.ready) chooseBotMoves();   /* its spots may no longer be in reach */
@@ -7364,7 +7587,7 @@ function startBoard() {
   }
 
   /* Board data for the game rules that come next, and for testing. */
-  window.globeBoard = { board, pieces, shells, blasts, splats, squishes, ghosts, rocks, mushrooms, webs, flames, tunnels, rails, wires, puddles, ice, frozen, iceDistance, rockGap, sphereToRock, rockDistance, view, turnState, pieceGap: (a, b) => pieceGap(a, b, radiusMm()), net, team: () => localTeam, isOver: () => gameOver };
+  window.globeBoard = { board, pieces, shells, blasts, splats, squishes, ghosts, terrain, elevation, cannonReach, rocks, mushrooms, webs, flames, tunnels, rails, wires, puddles, ice, frozen, iceDistance, rockGap, sphereToRock, rockDistance, view, turnState, pieceGap: (a, b) => pieceGap(a, b, radiusMm()), net, team: () => localTeam, isOver: () => gameOver };
   board.diameter = Number(diameterInput.value);
   groundRadius.value = board.diameter / 2;
   diameterValue.textContent = board.diameter + " mm";
