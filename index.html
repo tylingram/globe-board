@@ -1472,19 +1472,119 @@ function rockDistance(rock, x, y) {
     least = Math.min(least, distance - stoneOutline(stone, Math.atan2(dy, dx)));
   }
   for (const nodes of rock.chains || []) {
-    for (let i = 0; i + 1 < nodes.length; i++) {
-      const a = nodes[i];
-      const b = nodes[i + 1];
-      const dx = b.x - a.x;
-      const dy = b.y - a.y;
-      const span = dx * dx + dy * dy;
-      const t = span ? Math.min(1, Math.max(0, ((x - a.x) * dx + (y - a.y) * dy) / span)) : 0;
-      const gap = Math.hypot(x - a.x - dx * t, y - a.y - dy * t) - (a.width + (b.width - a.width) * t);
+    /* the rounded shape around the nodes holds the drawn foot, so it's a quick bound:
+       only near the cliff is the exact drawn shape worth checking */
+    const outline = cliffOutline(nodes);
+    const box = outline.box;
+    /* well clear of the cliff's box: the distance to the box is close enough */
+    if (x < box[0] - CLIFF_NEAR_MM || x > box[2] + CLIFF_NEAR_MM || y < box[1] - CLIFF_NEAR_MM || y > box[3] + CLIFF_NEAR_MM) {
+      const gap = Math.max(box[0] - x, x - box[2], box[1] - y, y - box[3]);
       if (gap < least) least = gap;
+      continue;
     }
+    const gap = outlineDistance(outline, x, y);
+    if (gap < least) least = gap;
   }
   return least;
 }
+
+/* The foot of a run of cliff, exactly as it's drawn: each node's edge points, out on
+   either side along the node's normal by its width, and between each pair of nodes the
+   two triangles the drawing fills. Inside any triangle is inside the rock. Worked out
+   once per run. */
+function cliffOutline(nodes) {
+  if (nodes.outline) return nodes.outline;
+  const rows = nodes.map((node, i) => {
+    const before = nodes[Math.max(0, i - 1)];
+    const after = nodes[Math.min(nodes.length - 1, i + 1)];
+    const run = Math.hypot(after.x - before.x, after.y - before.y) || 1;
+    const nx = -(after.y - before.y) / run;
+    const ny = (after.x - before.x) / run;
+    return [[node.x - nx * node.width, node.y - ny * node.width], [node.x + nx * node.width, node.y + ny * node.width]];
+  });
+  const triangles = [];
+  for (let i = 0; i + 1 < rows.length; i++) {
+    const [l0, r0] = rows[i];
+    const [l1, r1] = rows[i + 1];
+    for (const corners of [[l0, l1, r1], [l0, r1, r0]]) {
+      const cx = (corners[0][0] + corners[1][0] + corners[2][0]) / 3;
+      const cy = (corners[0][1] + corners[1][1] + corners[2][1]) / 3;
+      const spread = Math.max(...corners.map(([x, y]) => Math.hypot(x - cx, y - cy)));
+      triangles.push({ corners, cx, cy, spread });
+    }
+  }
+  const box = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const [l, r] of rows) {
+    for (const [x, y] of [l, r]) {
+      box[0] = Math.min(box[0], x); box[1] = Math.min(box[1], y);
+      box[2] = Math.max(box[2], x); box[3] = Math.max(box[3], y);
+    }
+  }
+  /* a grid over the cliff: each cell lists the triangles that come within reach of it */
+  const size = 4;
+  const x0 = box[0] - CLIFF_NEAR_MM - size;
+  const y0 = box[1] - CLIFF_NEAR_MM - size;
+  const nx = Math.ceil((box[2] + CLIFF_NEAR_MM + size - x0) / size);
+  const ny = Math.ceil((box[3] + CLIFF_NEAR_MM + size - y0) / size);
+  const cells = Array.from({ length: nx * ny }, () => []);
+  const reachOut = CLIFF_NEAR_MM + size * 0.75;
+  triangles.forEach((tri, index) => {
+    const xs = tri.corners.map((c) => c[0]);
+    const ys = tri.corners.map((c) => c[1]);
+    const i0 = Math.max(0, Math.floor((Math.min(...xs) - reachOut - x0) / size));
+    const i1 = Math.min(nx - 1, Math.floor((Math.max(...xs) + reachOut - x0) / size));
+    const j0 = Math.max(0, Math.floor((Math.min(...ys) - reachOut - y0) / size));
+    const j1 = Math.min(ny - 1, Math.floor((Math.max(...ys) + reachOut - y0) / size));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) cells[j * nx + i].push(index);
+  });
+  nodes.outline = { triangles, box, grid: { x0, y0, size, nx, ny, cells } };
+  return nodes.outline;
+}
+/* Distance from a point to the drawn foot: below zero inside it. The rock is the union
+   of its triangles, so this is the smallest signed distance to any of them. */
+/* Distance to the drawn foot, using the grid: only the triangles listed for the
+   point's cell can be within CLIFF_NEAR_MM. Farther than that, it says so. */
+function outlineDistance(outline, x, y) {
+  const g = outline.grid;
+  const cx = Math.floor((x - g.x0) / g.size);
+  const cy = Math.floor((y - g.y0) / g.size);
+  if (cx < 0 || cy < 0 || cx >= g.nx || cy >= g.ny) return CLIFF_NEAR_MM;
+  const list = g.cells[cy * g.nx + cx];
+  let best = CLIFF_NEAR_MM;
+  for (let n = 0; n < list.length; n++) {
+    const tri = outline.triangles[list[n]];
+    const ox = x - tri.cx;
+    const oy = y - tri.cy;
+    if (Math.sqrt(ox * ox + oy * oy) - tri.spread > best) continue;
+    const c = tri.corners;
+    let near = Infinity;
+    let sign = 0;
+    let mixed = false;
+    for (let k = 0; k < 3; k++) {
+      const ax = c[k][0], ay = c[k][1];
+      const bx = c[(k + 1) % 3][0], by = c[(k + 1) % 3][1];
+      const dx = bx - ax;
+      const dy = by - ay;
+      const span = dx * dx + dy * dy;
+      const t = span ? Math.min(1, Math.max(0, ((x - ax) * dx + (y - ay) * dy) / span)) : 0;
+      const ex = x - ax - dx * t;
+      const ey = y - ay - dy * t;
+      const d = Math.sqrt(ex * ex + ey * ey);
+      if (d < near) near = d;
+      const side = dx * (y - ay) - dy * (x - ax);
+      if (side !== 0) {
+        const s2 = side > 0 ? 1 : -1;
+        if (sign === 0) sign = s2;
+        else if (s2 !== sign) mixed = true;
+      }
+    }
+    const d = mixed ? near : -near;
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+const CLIFF_NEAR_MM = 16;   /* within this of a cliff, its drawn foot is measured exactly */
 
 /* A cliff's face from its foot to its top edge: [mm in from the edge, share of height].
    The ledges break it into layers. */
