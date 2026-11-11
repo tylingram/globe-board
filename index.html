@@ -767,16 +767,27 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
 
         /* Moss grows in soft patches with a broken, fuzzy edge. */
         float patches = layeredNoise(groundMm + 120.0, 62.0, mmPerPixel) + clods * 0.09 + grit * 0.05;
-        float moss = smoothstep(0.1, 0.2, patches);
+        float elevation = ${hills ? "vElev" : "0.0"};
+        /* Moss grows only on level ground. */
+        float moss = smoothstep(0.1, 0.2, patches) * (1.0 - smoothstep(0.1, 0.5, abs(elevation)));
         float tuft = layeredNoise(groundMm + 300.0, 2.4, mmPerPixel);
         vec3 mossColor = mix(${literal(colors.patchLow)}, ${literal(colors.patchHigh)}, clamp(0.5 + tuft * 1.1 + blotch * 0.4, 0.0, 1.0));
         diffuseColor.rgb = mix(dirt, mossColor, moss);
 
         /* Hills and valleys: higher ground a little lighter, lower a little darker, with
            a contour line every 1 mm and a stronger one every 5 mm. */
-        float elevation = ${hills ? "vElev" : "0.0"};
-        diffuseColor.rgb = mix(diffuseColor.rgb, ${literal("#c9a46a")}, clamp(elevation / 10.0, 0.0, 1.0) * 0.38);
-        diffuseColor.rgb = mix(diffuseColor.rgb, ${literal("#2a2f2a")}, clamp(-elevation / 10.0, 0.0, 1.0) * 0.45);
+        /* Uphill the ground turns grey and pale, like bare stone; downhill it turns a
+           deeper, darker green. The grain of the dirt still shows through both. */
+        {
+          float up = clamp(elevation / 10.0, 0.0, 1.0);
+          float down = clamp(-elevation / 10.0, 0.0, 1.0);
+          float grain = clamp(0.5 + blotch * 0.9 + clods * 0.55, 0.0, 1.0);
+          vec3 stone = mix(${literal("#8f8b84")}, ${literal("#d9d6cf")}, up) * (0.86 + grain * 0.28);
+          vec3 hollow = mix(${literal("#4d6a2f")}, ${literal("#1d3318")}, down) * (0.85 + grain * 0.3);
+          /* even a small rise or dip changes colour clearly, and it keeps going with height */
+          diffuseColor.rgb = mix(diffuseColor.rgb, stone, smoothstep(0.0, 0.25, up) * 0.5 + up * 0.42);
+          diffuseColor.rgb = mix(diffuseColor.rgb, hollow, smoothstep(0.0, 0.25, down) * 0.5 + down * 0.42);
+        }
         {
           float rise = max(fwidth(elevation), 1e-5);
           float slopeSeen = rise / mmPerPixel;
