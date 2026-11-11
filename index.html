@@ -6275,6 +6275,7 @@ function startBoard() {
   }
 
   function stopPiece(piece) {
+    piece.turnOverlap = null;
     piece.move = null;
     piece.plan2 = null;
     piece.shove = null;
@@ -6285,6 +6286,26 @@ function startBoard() {
     if (piece.plan) setPlan(piece, null);
     poseOnSphere(piece);
     poseCrawl(piece, 0);
+  }
+
+  /* Turning on the spot swings the piece's long body round, and its nose or tail can
+     end up over a rock or a neighbour. That isn't a bump: the piece may crawl on, as
+     long as its middle isn't pushing further into that rock or piece. Once clear of it,
+     the usual rules apply again. */
+  function noteTurnOverlaps(piece) {
+    const r = radiusMm();
+    piece.turnOverlap = {
+      pieces: new Set(pieces.filter((other) => other !== piece && !other.decoy && pieceGap(piece, other, r) < 0)),
+      rock: rockGap(piece) < 0,
+    };
+  }
+  const core = (pose) => ({ up: pose.up, forward: pose.forward, curl: 1 });   /* the piece's middle, as a ball */
+  function turnedInto(a, b, before) {
+    const r = radiusMm();
+    const listed = (x, y) => x.turnOverlap && x.turnOverlap.pieces.has(y);
+    if (!listed(a, b) && !listed(b, a)) return false;
+    const now = pieceGap(core(a), core(b), r);
+    return now >= 0 || now >= pieceGap(core(before.get(a)), core(before.get(b)), r);
   }
 
   /* Only a piece crawling closer counts as contact. Turning on the spot doesn't,
@@ -6300,7 +6321,14 @@ function startBoard() {
         /* A decoy leaves from under its owner, and two pieces both inside rock can pass. */
         if (a.source === b || b.source === a || (a.digging && b.digging)) continue;
         const gap = pieceGap(a, b, radiusMm());
-        if (gap >= 0 || gap >= pieceGap(before.get(a), before.get(b), radiusMm())) continue;
+        if (gap >= 0) {
+          if (a.turnOverlap) a.turnOverlap.pieces.delete(b);
+          if (b.turnOverlap) b.turnOverlap.pieces.delete(a);
+          continue;
+        }
+        const was = (x) => (crawled.has(x) ? before.get(x) : x);
+        if (gap >= pieceGap(was(a), was(b), radiusMm())) continue;
+        if (turnedInto(a, b, before)) continue;   /* only overlapping from turning round */
         /* Nothing stops for a decoy. It just pops. */
         if (a.decoy || b.decoy) {
           if (a.decoy) popped.add(a);
@@ -6314,7 +6342,8 @@ function startBoard() {
             rolledInto.push([roller, other]);
           }
         } else {
-          stopped.add(a).add(b);
+          if (crawled.has(a)) stopped.add(a);
+          if (crawled.has(b)) stopped.add(b);
           if (crawled.has(a) && !a.shove && perkOn(a, "melee")) hits.push([a, b]);
           if (crawled.has(b) && !b.shove && perkOn(b, "melee")) hits.push([b, a]);
         }
@@ -6490,7 +6519,12 @@ function startBoard() {
         piece.digging = inside;
         continue;
       }
+      if (gap >= 0 && piece.turnOverlap) piece.turnOverlap.rock = false;
       if (gap >= 0 || gap >= rockGap(before.get(piece))) continue;
+      if (piece.turnOverlap && piece.turnOverlap.rock) {   /* only overlapping from turning round */
+        const middle = rockGap(core(piece));
+        if (middle >= 0 || middle >= rockGap(core(before.get(piece)))) continue;
+      }
       Object.assign(piece, before.get(piece));
       stopPiece(piece);
       turnState.rockStops++;
@@ -6531,6 +6565,7 @@ function startBoard() {
       if (!piece.move.facing) {
         piece.move.facing = turnToward(piece, target, seconds);
         piece.clock += TURN_STEPS * seconds;
+        if (piece.move.facing) noteTurnOverlaps(piece);
       } else {
         crawled.add(piece);
         const step = (crawlSpeed(piece) * seconds) / radiusMm();
@@ -7028,7 +7063,7 @@ function startBoard() {
      links to other things, which are sent as ids instead. */
   const PIECE_SKIP = new Set(["mesh", "tag", "arrow", "aimMark", "aimMark2", "extraArrows", "legs", "antennae", "curlParts",
     "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "flameMark",
-    "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt"]);
+    "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt", "turnOverlap"]);
   function packPiece(piece) {
     const out = {};
     for (const [key, value] of Object.entries(piece)) {
