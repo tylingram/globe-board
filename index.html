@@ -646,6 +646,7 @@ const TERRAIN_LOW_MM = 10;     /* the deepest a valley goes */
 const EARTH_BEND_MM = 10;      /* how far Earth bending raises the ground under a ball */
 const BEND_GRADE = 0.2;        /* its slope down: 1 mm in 5 */
 const BEND_TOP_MM = 3;         /* the level top it leaves under the piece */
+const EARTH_BEND_SECONDS = 3;  /* how long the ground takes to rise */
 const TERRAIN_HIGH_SHARE = 0.35;   /* of the globe above the base line */
 const TERRAIN_LOW_SHARE = 0.15;    /* and below it; the rest stays level */
 const TERRAIN_STEEP = 1 / 3;       /* slopes run between 1 mm in 3 */
@@ -745,10 +746,13 @@ function terrainHeightAt(features, waves, x, y, z, radiusMm) {
     }
     height = high + low;
   }
-  /* Earth bending: a raised cone over the ground, the higher of the two wins */
-  for (const bend of features.bends || []) {
+  return bentHeight(features.bends, x, y, z, radiusMm, height);
+}
+/* Earth bending: a raised cone over the ground, the higher of the two wins. (x, y, z) is a unit direction. */
+function bentHeight(bends, x, y, z, radiusMm, height) {
+  for (const bend of bends || []) {
     const d = Math.acos(Math.max(-1, Math.min(1, bend.at.x * x + bend.at.y * y + bend.at.z * z))) * radiusMm;
-    const raised = bend.apex - Math.max(0, d - BEND_TOP_MM) * BEND_GRADE;
+    const raised = bend.apex * (bend.grow ?? 1) - Math.max(0, d - BEND_TOP_MM) * BEND_GRADE;
     if (raised > height) height = raised;
   }
   return height;
@@ -970,7 +974,7 @@ const PERKS = [
   { id: "darkarts", type: "ball", cools: 2, name: "Dark Arts", text: "Switch on, then roll up on a fallen teammate's blood splatter to bring that piece back at 25 HP, with no perks. Then it needs 2 turns before it can do that again." },
   { id: "pain", type: "ball", name: "Pain packet", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell." },
   { id: "pushpull", type: "fire", cools: 2, name: "+/-", text: "Tap to switch it on as Push, tap again for Pull. Every piece the shell hurts is shoved 10 mm straight away from where it lands, or pulled 10 mm toward it; a piece rolled into a ball takes no damage but still moves 5 mm. Then it needs 2 turns before it can be used again." },
-  { id: "doping", type: "move", cools: 2, name: "Doping", text: "Costs 10 HP. Give the piece a move, then pick it again and choose Fire cannon: it moves, then fires from where it ends up, with no cannon perks. Needs more than 10 HP. Then it needs 2 turns before it can be used again." },
+  { id: "doping", type: "move", cools: 2, name: "Doping", text: "Costs 10 HP. Give the piece a move, then aim its shot: it moves, then fires from where it ends up, with no cannon perks. Needs more than 10 HP. Then it needs 2 turns before it can be used again." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
 const BIG_RADIUS_MM = BLAST_RADIUS_MM * 2;
@@ -2557,6 +2561,7 @@ function startBoard() {
   })();
 
   const SIM_STEP = 1 / 120;
+  let bendClock = 0;
   let simClock = 0;
 
   function frame(now) {
@@ -2579,6 +2584,15 @@ function startBoard() {
       simClock -= SIM_STEP;
     }
     if (glide) stepGlide(seconds);
+    bendClock += seconds;
+    if (bendClock > 0.1) {
+      for (const bend of terrain.bends) {
+        if (!bend.dirty) continue;
+        bend.dirty = false;
+        refreshGround(bend);
+      }
+      bendClock = 0;
+    }
     if (mushrooms.length) stepMushrooms(seconds * playSpeed);
     if (pointers.size === 0 && Math.hypot(view.spinX, view.spinY) > 0.0003) {
       spin(view.spinX, view.spinY);
@@ -3422,13 +3436,11 @@ function startBoard() {
     needsDraw = true;
   }
 
-  /* The rocks' shapes, sitting on the ground as it is now. */
-  function shapeRocks() {
+  /* The rocks' shapes, sitting on the ground as it is now. Each rock's shape is kept, so
+     when only one patch of ground moves (Earth bending), only the rocks for which `near`
+     says yes are set down on it again. */
+  function shapeRocks(near = null) {
     const r = radiusMm();
-    const positions = [];
-    const colors = [];
-    const tops = { positions: [], normals: [] };
-    for (const rock of rocks) addRockShape(rock, r, positions, colors, tops);
     const settle = (list) => {
       const q = new THREE.Vector3();
       for (let i = 0; i < list.length; i += 3) {
@@ -3439,19 +3451,45 @@ function startBoard() {
         list[i] = q.x * out; list[i + 1] = q.y * out; list[i + 2] = q.z * out;
       }
     };
-    settle(positions);
-    settle(tops.positions);
+    const shapes = [];
+    for (const rock of rocks) {
+      let kept = rock.shapeKept;
+      if (!kept || kept.r !== r || !near) {
+        const raw = { positions: [], colors: [], tops: { positions: [], normals: [] } };
+        addRockShape(rock, r, raw.positions, raw.colors, raw.tops);
+        kept = rock.shapeKept = { r, raw, set: null };
+      }
+      if (!kept.set || !near || near(rock)) {
+        kept.set = { positions: kept.raw.positions.slice(), tops: kept.raw.tops.positions.slice() };
+        settle(kept.set.positions);
+        settle(kept.set.tops);
+      }
+      shapes.push(kept);
+    }
+    const join = (pick) => {
+      const out = new Float32Array(shapes.reduce((n, kept) => n + pick(kept).length, 0));
+      let at = 0;
+      for (const kept of shapes) { out.set(pick(kept), at); at += pick(kept).length; }
+      return out;
+    };
+    const positions = join((kept) => kept.set.positions);
+    const colors = join((kept) => kept.raw.colors);
+    const tops = { positions: join((kept) => kept.set.tops), normals: join((kept) => kept.raw.tops.normals) };
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
     geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-    rockMesh.geometry.dispose();
-    rockMesh.geometry = geometry;
     const topShape = new THREE.BufferGeometry();
     topShape.setAttribute("position", new THREE.Float32BufferAttribute(tops.positions, 3));
     topShape.setAttribute("normal", new THREE.Float32BufferAttribute(tops.normals, 3));
-    cliffTopMesh.geometry.dispose();
-    cliffTopMesh.geometry = topShape;
-    if (ice.rock) for (const mesh of [cliffTopMesh, rockMesh]) measureIce(mesh.geometry);
+    /* setting a rock down again only moves it up or down, so how far the ice is from each
+       point stays the same */
+    for (const [mesh, fresh] of [[rockMesh, geometry], [cliffTopMesh, topShape]]) {
+      const old = mesh.geometry.attributes.aIceDist;
+      if (ice.rock && near && old && old.count === fresh.attributes.position.count) fresh.setAttribute("aIceDist", old);
+      else if (ice.rock) measureIce(fresh);
+      mesh.geometry.dispose();
+      mesh.geometry = fresh;
+    }
     needsDraw = true;
   }
 
@@ -3723,27 +3761,43 @@ function startBoard() {
   }
 
   /* The ground mesh follows the hills, with its normals worked out from the slope. */
-  function raiseGround() {
+  let plainHeights = null;
+  /* `area` ({ at, cos }) limits the work to the ground around one spot. */
+  function raiseGround(area = null) {
     const geometry = groundMesh.geometry;
     const places = geometry.attributes.position;
     const normals = geometry.attributes.normal;
     const { widthSegments: across, heightSegments: down } = geometry.parameters;
     const r = radiusMm();
     const out = places.array;
-    const heights = new Float32Array(places.count);
+    const old = geometry.attributes.aElev;
+    const heights = area && old ? old.array : new Float32Array(places.count);
+    const outside = (i, slack = 0) => area && groundBase[i * 3] * area.at.x + groundBase[i * 3 + 1] * area.at.y + groundBase[i * 3 + 2] * area.at.z < area.cos - slack;
+    /* the height before any Earth bending, kept so a rising hill only adds its cone */
+    if (!area || !plainHeights || plainHeights.length !== places.count) {
+      plainHeights = new Float32Array(places.count);
+      const bends = terrain.bends;
+      terrain.bends = [];
+      for (let i = 0; i < places.count; i++) plainHeights[i] = terrainHeightAt(terrain, terrain.waves, groundBase[i * 3], groundBase[i * 3 + 1], groundBase[i * 3 + 2], r);
+      terrain.bends = bends;
+    }
     for (let i = 0; i < places.count; i++) {
+      if (outside(i)) continue;
       const x = groundBase[i * 3], y = groundBase[i * 3 + 1], z = groundBase[i * 3 + 2];
-      heights[i] = terrainHeightAt(terrain, terrain.waves, x, y, z, r);
+      const length = Math.sqrt(x * x + y * y + z * z) || 1;
+      heights[i] = bentHeight(terrain.bends, x / length, y / length, z / length, r, plainHeights[i]);
       const scale = (1 + heights[i] / r) / (Math.sqrt(x * x + y * y + z * z) || 1);
       out[i * 3] = x * scale; out[i * 3 + 1] = y * scale; out[i * 3 + 2] = z * scale;
     }
-    geometry.setAttribute("aElev", new THREE.BufferAttribute(heights, 1));
+    if (area && old) old.needsUpdate = true;
+    else geometry.setAttribute("aElev", new THREE.BufferAttribute(heights, 1));
     /* normals across the grid: around and down, from the neighbours on each side */
     const at = (ix, iy) => ((iy * (across + 1)) + ((ix + across) % across)) * 3;
     const u = new THREE.Vector3(), v = new THREE.Vector3(), n = new THREE.Vector3(), p = new THREE.Vector3();
     for (let iy = 0; iy <= down; iy++) {
       for (let ix = 0; ix <= across; ix++) {
         const i = (iy * (across + 1) + ix) * 3;
+        if (outside(i / 3, 0.01)) continue;
         p.set(groundBase[i], groundBase[i + 1], groundBase[i + 2]).normalize();
         if (iy === 0 || iy === down) { normals.setXYZ(i / 3, p.x, p.y, p.z); continue; }
         const e = at(ix + 1, iy), w = at(ix - 1, iy), nn = at(ix, iy - 1), ss = at(ix, iy + 1);
@@ -3756,7 +3810,9 @@ function startBoard() {
     }
     places.needsUpdate = true;
     normals.needsUpdate = true;
-    geometry.computeBoundingSphere();
+    /* a rising hill never goes past the highest the ground can be */
+    if (area && geometry.boundingSphere) geometry.boundingSphere.radius = Math.max(geometry.boundingSphere.radius, 1 + TERRAIN_HIGH_MM / r);
+    else geometry.computeBoundingSphere();
   }
 
   /* Earth bending: the ground under the piece rises 10 mm, to at most 15 mm, with a
@@ -3765,42 +3821,51 @@ function startBoard() {
     const before = elevation(piece.up);
     const apex = Math.min(TERRAIN_HIGH_MM, before + EARTH_BEND_MM);
     if (apex <= before + 0.01) return false;
-    terrain.bends.push({ at: piece.up.clone().normalize(), apex });
+    terrain.bends.push({ at: piece.up.clone().normalize(), apex, grow: 0 });
     floatLabel(piece, "Earth bending", "hit heal");
     return true;
   }
   /* After the ground changes shape: the mesh, the rocks, the plants and everything that
      sits on the ground go back on top of it. */
-  function refreshGround() {
+  function refreshGround(bend = null) {
     const r = radiusMm();
-    raiseGround();
-    shapeRocks();
+    /* around a rising hill, only what it can reach; otherwise everything */
+    const area = bend ? { at: bend.at, cos: Math.cos(Math.min(Math.PI, (BEND_TOP_MM + bend.apex / BEND_GRADE + 3) / r)) } : null;
+    const near = (v) => !area || v.clone().normalize().dot(area.at) >= area.cos;
+    raiseGround(area);
+    const rockNear = (rock) => rock.up.angleTo(area.at) * r < rock.reach + BEND_TOP_MM + bend.apex / BEND_GRADE + 5;
+    if (!area) shapeRocks();
+    else if (rocks.some(rockNear)) shapeRocks(rockNear);
     const matrix = new THREE.Matrix4();
     for (const spot of plants.spots) {
+      if (!near(spot.up)) continue;
       matrix.compose(spot.up.clone().multiplyScalar(1 + elevation(spot.up) / r), spot.turn, new THREE.Vector3(spot.size, spot.size, spot.size));
       spot.mesh.setMatrixAt(spot.index, matrix);
     }
     for (const kind of ["grass", "plant"]) if (plants[kind]) plants[kind].instanceMatrix.needsUpdate = true;
     for (const piece of pieces) poseOnSphere(piece);
     for (const splat of splats) {
+      if (!near(splat.spot)) continue;
       splat.mesh.geometry.dispose();
       splat.mesh.geometry = surfacePatch(splat.spot, SPLAT_SIZE_MM / r, splat.heading);
     }
     for (const web of webs) {
+      if (!near(web.spot)) continue;
       web.mesh.geometry.dispose();
       web.mesh.geometry = surfacePatch(web.spot, (web.radius * 2) / r, web.heading || 0);
     }
-    for (const puddle of puddles) redrawPuddle(puddle);
-    for (const line of wires) if (line.mesh) redrawWire(line);
-    for (const line of rails) if (line.mesh) redrawRail(line);
+    for (const puddle of puddles) if (near(puddle.spot)) redrawPuddle(puddle);
+    for (const line of wires) if (line.mesh && line.points.some(near)) redrawWire(line);
+    for (const line of rails) if (line.mesh && line.points.some(near)) redrawRail(line);
     const reseat = (thing) => {
+      if (!near(thing.position)) return;
       const dir = thing.position.clone().normalize();
       thing.position.copy(dir).multiplyScalar(1 + groundLift(dir));
     };
     for (const mushroom of mushrooms) if (mushroom.mesh) reseat(mushroom.mesh);
     for (const mouth of tunnels) reseat(mouth);
     for (const mesh of frozen) reseat(mesh);
-    if (ice.lastLand) { ice.lastLand.key = null; showLastLand(); }
+    if (ice.lastLand && near(ice.lastLand.spot)) { ice.lastLand.key = null; showLastLand(); }
     for (const piece of pieces) drawArrow(piece);
     if (selected) drawCircle();
     needsDraw = true;
@@ -4635,6 +4700,13 @@ function startBoard() {
         : "Move set. Click inside the blue circle to send the decoy, or deselect to skip it.");
       return;
     }
+    if (perkOn(piece, "doping") && piece.plan && canFire(piece)) {
+      action = "fire";
+      orderLeg = "first";
+      drawCircle();
+      say(`Move set: ${Math.round(distance)} mm away.${tunnelNote} Doping: now click inside the red area to aim the shot it fires from there, or deselect to skip it.`);
+      return;
+    }
     select(null);
     say(`Move set: ${Math.round(distance)} mm away.${tunnelNote} Order another piece, or end your turn.`);
   }
@@ -4912,7 +4984,7 @@ function startBoard() {
     for (const piece of pieces) {
       if (piece.roll && !piece.decoy && perkOn(piece, "earthbend") && bendEarth(piece)) bent = true;
     }
-    if (bent) refreshGround();
+    if (bent) needsDraw = true;   /* the ground rises as the turn plays */
     for (const piece of pieces) {
       piece.curlGoal = piece.roll ? 1 : 0;
       if (piece.roll) {
@@ -6872,12 +6944,17 @@ function startBoard() {
     stepShots(seconds);
     stepBooms(seconds);
     if (ghosts.length) stepGhosts(seconds);
+    for (const bend of terrain.bends) {
+      if (bend.grow >= 1) continue;
+      bend.grow = Math.min(1, bend.grow + seconds / EARTH_BEND_SECONDS);
+      bend.dirty = true;
+    }
     if (ice.rock) stepIce(seconds);
     needsDraw = true;
     if (flames.length) scorch();
     if (wires.length) snagOnWire();
     const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS);
-    if (busy || shells.length || blasts.length || squishes.length || ghosts.length) return;
+    if (busy || shells.length || blasts.length || squishes.length || ghosts.length || terrain.bends.some((bend) => bend.grow < 1)) return;
     /* Once everything else is done, the ice spreads, unless the game is already won. */
     if (ice.rock && !ice.spread && sidesLeft() > 1) {
       ice.spread = true;
@@ -7981,7 +8058,7 @@ function startBoard() {
     ice.goal = snap.ice.goal;
     ice.spreads = snap.ice.spreads;
     if (snap.bends && !same(snap.bends, terrain.bends.map((bend) => ({ at: V(bend.at), apex: bend.apex })))) {
-      terrain.bends = snap.bends.map((bend) => ({ at: toV(bend.at), apex: bend.apex }));
+      terrain.bends = snap.bends.map((bend) => ({ at: toV(bend.at), apex: bend.apex, grow: 1 }));
       refreshGround();
     }
     if (Array.isArray(snap.ice.steps)) setIceSteps(snap.ice.steps);
