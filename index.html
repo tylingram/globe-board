@@ -490,7 +490,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
 
     <section class="group">
       <span class="label">Hills and valleys</span>
-      <p class="note">The ground rises up to 10 mm and dips down to 10 mm, shown by contour lines every 1 mm (a darker one every 5 mm). A cannon reaches 100 mm plus the shooter's height minus the target's: from a 10 mm hill it reaches 110 mm onto level ground and 120 mm into a 10 mm valley, but only 90 mm from level ground up onto that hill. The flame's reach stays 75 mm.</p>
+      <p class="note">The ground rises up to 15 mm and dips down to 10 mm, shown by contour lines every 1 mm (a darker one every 5 mm). A cannon reaches 100 mm plus the shooter's height minus the target's: from a 10 mm hill it reaches 110 mm onto level ground and 120 mm into a 10 mm valley, but only 90 mm from level ground up onto that hill. The flame's reach stays 75 mm.</p>
     </section>
 
     <section class="group">
@@ -626,7 +626,11 @@ const GROUND_SHADER = `
    the higher one wins; hills and valleys never touch, so every slope stays between
    1 mm in 3 and 1 mm in 10. The same sum runs here and in the ground shader. */
 const TERRAIN_MAX = 320;       /* lumps, spurs and valley stretches on the globe, at most */
-const TERRAIN_LIMIT_MM = 10;   /* the highest hill and the deepest valley */
+const TERRAIN_HIGH_MM = 15;    /* the highest the ground can rise */
+const TERRAIN_LOW_MM = 10;     /* the deepest a valley goes */
+const EARTH_BEND_MM = 10;      /* how far Earth bending raises the ground under a ball */
+const BEND_GRADE = 0.2;        /* its slope down: 1 mm in 5 */
+const BEND_TOP_MM = 3;         /* the level top it leaves under the piece */
 const TERRAIN_HIGH_SHARE = 0.35;   /* of the globe above the base line */
 const TERRAIN_LOW_SHARE = 0.15;    /* and below it; the rest stays level */
 const TERRAIN_STEEP = 1 / 3;       /* slopes run between 1 mm in 3 */
@@ -715,15 +719,24 @@ function terrainHeightAt(features, waves, x, y, z, radiusMm) {
   const length = Math.sqrt(x * x + y * y + z * z) || 1;
   x /= length; y /= length; z /= length;
   const list = features.cells ? features.cells[terrainCell(x, y, z)] : features;
-  if (!list.length) return 0;
-  const wave = terrainWave(waves, x, y, z);
-  let high = 0;
-  let low = 0;
-  for (const f of list) {
-    const h = terrainPieceHeight(f, x, y, z, wave, radiusMm);
-    if (h > 0) high = Math.max(high, h); else if (h < 0) low = Math.min(low, h);
+  let height = 0;
+  if (list.length) {
+    const wave = terrainWave(waves, x, y, z);
+    let high = 0;
+    let low = 0;
+    for (const f of list) {
+      const h = terrainPieceHeight(f, x, y, z, wave, radiusMm);
+      if (h > 0) high = Math.max(high, h); else if (h < 0) low = Math.min(low, h);
+    }
+    height = high + low;
   }
-  return high + low;
+  /* Earth bending: a raised cone over the ground, the higher of the two wins */
+  for (const bend of features.bends || []) {
+    const d = Math.acos(Math.max(-1, Math.min(1, bend.at.x * x + bend.at.y * y + bend.at.z * z))) * radiusMm;
+    const raised = bend.apex - Math.max(0, d - BEND_TOP_MM) * BEND_GRADE;
+    if (raised > height) height = raised;
+  }
+  return height;
 }
 /* How far the ground stands above the base sphere under a direction, in sphere radii.
    Everything that sits on the ground adds this. Set once the hills are laid out. */
@@ -779,7 +792,7 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
         /* Uphill the ground turns grey and pale, like bare stone; downhill it turns a
            deeper, darker green. The grain of the dirt still shows through both. */
         {
-          float up = clamp(elevation / 10.0, 0.0, 1.0);
+          float up = clamp(elevation / 15.0, 0.0, 1.0);
           float down = clamp(-elevation / 10.0, 0.0, 1.0);
           float grain = clamp(0.5 + blotch * 0.9 + clods * 0.55, 0.0, 1.0);
           vec3 stone = mix(${literal("#8f8b84")}, ${literal("#d9d6cf")}, up) * (0.86 + grain * 0.28);
@@ -854,13 +867,14 @@ const BLAST_DAMAGE = [
 const BLAST_RADIUS_MM = 20;
 const SPLAT_SIZE_MM = 26;      /* across the whole splatter, droplets included */
 const SQUISH_SECONDS = 0.22;
-const ROCK_AREA_MM2 = 20000;   /* one rock formation per this much surface */
-const ROCK_COUNT = [3, 24];    /* fewest and most on any sphere */
+const ROCK_AREA_MM2 = 17300;   /* one rock formation per this much surface (about 20% more cliffs than before) */
+const ROCK_COUNT = [3, 28];    /* fewest and most on any sphere */
 const STONE_REACH = 1.27;      /* the farthest a stone's outline can reach, as a multiple of radius */
 const STONE_SPACING = 0.72;    /* how tightly stones sit in a row, so no piece fits between */
 const ROCK_GAP_MM = 14;        /* always room for a piece to pass between two rocks */
 const MUSHROOM_CHANCE = 0.375;       /* of mushrooms sprouting, each turn */
-const MUSHROOM_PAIR_CHANCE = 0.5;    /* that two sprout at once instead of one */
+const MUSHROOM_TRIO_CHANCE = 0.25;   /* that three sprout at once */
+const MUSHROOM_PAIR_CHANCE = 0.5;    /* that two do; otherwise one */
 const MUSHROOM_CLEARANCE_MM = 50;    /* it always sprouts farther than this from every piece */
 const MUSHROOM_BUD_TURNS = 2;        /* turns before it blooms */
 const MUSHROOM_BLOOM_TURNS = 3;      /* turns in bloom before it wilts */
@@ -940,6 +954,9 @@ const PERKS = [
   { id: "igloo", type: "ball", cools: 2, name: "Igloo", text: "Switch on, then roll into a ball: if the ice catches it this turn, the ball rolls itself off the ice, unharmed. Then it needs 2 turns before it can do that again." },
   { id: "darkarts", type: "ball", cools: 2, name: "Dark Arts", text: "Switch on, then roll up on a fallen teammate's blood splatter to bring that piece back at 25 HP, with no perks. Then it needs 2 turns before it can do that again." },
   { id: "pain", type: "ball", name: "Pain packet", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell." },
+  { id: "pushpull", type: "fire", cools: 2, name: "+/-", text: "Tap to switch it on as Push, tap again for Pull. Every piece the shell hurts is shoved 10 mm straight away from where it lands, or pulled 10 mm toward it; a piece rolled into a ball takes no damage but still moves 5 mm. Then it needs 2 turns before it can be used again." },
+  { id: "doping", type: "move", cools: 2, name: "Doping", text: "Costs 10 HP. Give the piece a move, then pick it again and choose Fire cannon: it moves, then fires from where it ends up, with no cannon perks. Needs more than 10 HP. Then it needs 2 turns before it can be used again." },
+  { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
 const BIG_RADIUS_MM = BLAST_RADIUS_MM * 2;
 const BIG_OUTER_TRIM_MM = 5;         /* a big shell's outermost ring is this much narrower than double */
@@ -1344,13 +1361,13 @@ function seededRandom(seed) {
    give height as a multiple of radius, cliffs in mm. `size` shrinks shapes on small
    spheres, where a long wall would wrap around. */
 const ROCK_KINDS = [
-  { name: "boulder", share: 0.18, make: (r, size) => {
+  { name: "boulder", share: 0.156, make: (r, size) => {
     const length = (1 + r() * 14) * size;
     const curve = (r() - 0.5) * length;
     const width = 8 + r() * 9;
     return { path: (t) => [length * (t - 0.5), curve * (1 - (2 * t - 1) ** 2)], length, width, height: 0.75 };
   } },
-  { name: "mesa", share: 0.18, make: (r, size) => {
+  { name: "mesa", share: 0.187, make: (r, size) => {
     const length = (12 + r() * 45) * size;
     const curve = (r() - 0.5) * length * 0.8;
     return {
@@ -1358,7 +1375,7 @@ const ROCK_KINDS = [
       length, width: (13 + r() * 15) * Math.max(size, 0.6), height: 12 + r() * 14, taper: 0.5, cliff: true,
     };
   } },
-  { name: "wall", share: 0.16, make: (r, size) => {
+  { name: "wall", share: 0.166, make: (r, size) => {
     const length = (35 + r() * 105) * size;
     const bow = (r() - 0.5) * length * 0.4;
     return {
@@ -1366,7 +1383,7 @@ const ROCK_KINDS = [
       length, width: 4.5 + r() * 6, height: 10 + r() * 10, taper: 0.4, cliff: true, spurs: true,
     };
   } },
-  { name: "u", share: 0.16, make: (r, size) => {
+  { name: "u", share: 0.166, make: (r, size) => {
     const bend = (17 + r() * 10) * Math.max(size, 0.75);
     const armA = (14 + r() * 34) * size;
     const armB = (14 + r() * 34) * size;
@@ -1381,7 +1398,7 @@ const ROCK_KINDS = [
     };
     return { path, length, width: 4.5 + r() * 3.5, maxWidth: bend * 0.7, height: 10 + r() * 10, taper: 0.3, cliff: true };
   } },
-  { name: "crescent", share: 0.11, make: (r, size) => {
+  { name: "crescent", share: 0.114, make: (r, size) => {
     const radius = (22 + r() * 34) * size;
     const sweep = 1.6 + r() * 2.4;
     const path = (t) => {
@@ -1393,7 +1410,7 @@ const ROCK_KINDS = [
       height: 11 + r() * 12, taper: 0.6, cliff: true, spurs: true,
     };
   } },
-  { name: "bend", share: 0.09, make: (r, size) => {
+  { name: "bend", share: 0.094, make: (r, size) => {
     const legA = (22 + r() * 40) * size;
     const legB = (22 + r() * 40) * size;
     const turn = 0.9 + r() * 1.4;
@@ -1411,7 +1428,7 @@ const ROCK_KINDS = [
     };
     return { path, length, width: 5 + r() * 5, maxWidth: corner * 0.75, height: 10 + r() * 10, taper: 0.4, cliff: true, spurs: true };
   } },
-  { name: "snake", share: 0.07, make: (r, size) => {
+  { name: "snake", share: 0.073, make: (r, size) => {
     const length = (50 + r() * 70) * size;
     const swing = (9 + r() * 14) * size;
     const waves = 1 + r() * 0.6;
@@ -1422,7 +1439,7 @@ const ROCK_KINDS = [
       height: 9 + r() * 10, taper: 0.4, cliff: true,
     };
   } },
-  { name: "spire", share: 0.05, make: (r) => {
+  { name: "spire", share: 0.043, make: (r) => {
     return { path: () => [0, 0], length: 0, width: 4 + r() * 3.5, height: 2.6 + r() * 1.6, sharp: true };
   } },
 ];
@@ -2520,12 +2537,15 @@ function startBoard() {
   const painReady = (piece) => hasPerk(piece, "pain") && piece.painTurn === turnState.number;
   const perkOn = (piece, id) => piece.perksOn.has(id) || (id === "tunnel" && piece.perks.includes("tunnel"));
   /* The flame is aimed first, when it's on; every other fire click is the cannon. */
-  const aimingFlame = (piece) => !!piece && perkOn(piece, "flame") && action === "fire" && orderLeg === "first";
+  const aimingFlame = (piece) => !!piece && perkOn(piece, "flame") && action === "fire" && orderLeg === "first" && !(perkOn(piece, "doping") && piece.plan);
   const fireReach = (piece) => (aimingFlame(piece) ? FLAME_RANGE_MM : FIRE_RANGE_MM);
   const slowed = (piece) => turnState.number >= piece.slowFrom && turnState.number <= piece.slowTurn;
   const moveReach = (piece) => (slowed(piece) ? WEB_MOVE_MM : MOVE_RANGE_MM);
   const crawlSpeed = (piece) => (piece.ride ? RAIL_SPEED_MM : CRAWL_SPEED_MM * (perkOn(piece, "double") ? 2 : 1) * (slowed(piece) ? 0.5 : 1));
-  const shellMods = (piece) => ({ web: perkOn(piece, "web"), pierce: perkOn(piece, "pierce"), big: perkOn(piece, "big"), puddle: perkOn(piece, "puddle") });
+  const shellMods = (piece) => (piece.plainShot ? { web: false, pierce: false, big: false, puddle: false, pushpull: null } : {
+    web: perkOn(piece, "web"), pierce: perkOn(piece, "pierce"), big: perkOn(piece, "big"), puddle: perkOn(piece, "puddle"),
+    pushpull: perkOn(piece, "pushpull") ? (piece.pushMode === "pull" ? "pull" : "push") : null,
+  });
 
   const ballShape = new THREE.Sphere(new THREE.Vector3(), 1);
   const raycaster = new THREE.Raycaster();
@@ -2730,7 +2750,9 @@ function startBoard() {
   }
 
   /* Where the order being set starts. A second move starts where the first one ends. */
-  const orderFrom = () => (orderLeg === "second" ? selected.plan : selected.up);
+  const doping = (piece) => !!piece && perkOn(piece, "doping") && !!piece.plan;
+  const orderFrom = () => (orderLeg === "second" ? selected.plan
+    : action === "fire" && doping(selected) ? selected.plan2 || selected.plan : selected.up);
 
   function drawCircle() {
     circleFill.visible = circleEdge.visible = !!selected && action !== "ball";
@@ -2746,7 +2768,7 @@ function startBoard() {
       circleFill.material = rangeFill;
       circleEdge.material = rangeEdge;
       rangeUniforms.uEdge.value = markWidthMm();
-      const widest = (FIRE_RANGE_MM + 2 * TERRAIN_LIMIT_MM + 2) / radiusMm();
+      const widest = (FIRE_RANGE_MM + TERRAIN_HIGH_MM + TERRAIN_LOW_MM + 2) / radiusMm();
       const area = capGeometry(orderFrom(), 0, widest, 72);
       /* for each point: its distance, less the cannon's reach to it (below 0 is in range) */
       const from = orderFrom().clone().normalize();
@@ -2831,11 +2853,11 @@ function startBoard() {
       const width = markWidthMm();
       piece.arrow = new THREE.Mesh(
         arrowGeometry(piece.up, target, 6 / r, width / 2 / r, (width * 3.2) / r),
-        piece.fire || piece.flameAt ? blastPaint : arrowPaint[piece.team]
+        !piece.plan && (piece.fire || piece.flameAt) ? blastPaint : arrowPaint[piece.team]
       );
       globe.add(piece.arrow);
       if (piece.fire) {
-        piece.aimMark = blastMark(piece.fire, shellMods(piece));
+        piece.aimMark = blastMark(piece.fire, piece.plan ? {} : shellMods(piece));
         globe.add(piece.aimMark);
       }
       const extra = (from, to, paint) => {
@@ -2845,6 +2867,7 @@ function startBoard() {
         piece.extraArrows.push(arrow);
       };
       if (piece.plan && piece.plan2) extra(piece.plan, piece.plan2, arrowPaint[piece.team]);
+      if (piece.plan && piece.fire) extra(piece.plan2 || piece.plan, piece.fire, blastPaint);   /* Doping: the shot after the move */
       /* An X where the move will run into rock and stop short. A digger goes through. */
       if (piece.plan && piece.team === localTeam && !moving && !perkOn(piece, "tunnel")) {
         const stop = rockStopOnPath(piece.up, piece.plan) || (piece.plan2 ? rockStopOnPath(piece.plan, piece.plan2) : null);
@@ -2991,6 +3014,7 @@ function startBoard() {
       button.disabled = !ready || !!perk.passive;
       const name = document.createElement("span");
       name.textContent = perk.id === "pain" && painReady(selected) ? `${perk.name}: two shots this turn`
+        : perk.id === "pushpull" && perkOn(selected, perk.id) ? `${perk.name}: ${selected.pushMode === "pull" ? "Pull" : "Push"}`
         : perk.passive || ready ? perk.name : `${perk.name}: cooling down`;
       const about = document.createElement("small");
       about.textContent = perk.text;
@@ -3002,10 +3026,17 @@ function startBoard() {
 
   /* Perks change what an order can be, so a change starts the piece's order over. */
   function togglePerk(piece, id) {
-    if (perkOn(piece, id)) {
+    if (id === "pushpull" && perkOn(piece, id) && piece.pushMode !== "pull") {
+      piece.pushMode = "pull";
+    } else if (perkOn(piece, id)) {
       piece.perksOn.delete(id);
     } else {
+      if (id === "doping" && piece.hp <= 10) {
+        say("Doping costs 10 HP, and this piece doesn't have more than that.");
+        return;
+      }
       piece.perksOn.add(id);
+      if (id === "pushpull") piece.pushMode = "push";
     }
     if (PERKS.find((perk) => perk.id === id).type === "ball") {
       drawPerks();
@@ -3196,6 +3227,14 @@ function startBoard() {
     }
 
     layOutTerrain();
+    shapeRocks();
+    layOutPlants();
+    needsDraw = true;
+  }
+
+  /* The rocks' shapes, sitting on the ground as it is now. */
+  function shapeRocks() {
+    const r = radiusMm();
     const positions = [];
     const colors = [];
     const tops = { positions: [], normals: [] };
@@ -3222,7 +3261,7 @@ function startBoard() {
     topShape.setAttribute("normal", new THREE.Float32BufferAttribute(tops.normals, 3));
     cliffTopMesh.geometry.dispose();
     cliffTopMesh.geometry = topShape;
-    layOutPlants();
+    if (ice.rock) for (const mesh of [cliffTopMesh, rockMesh]) measureIce(mesh.geometry);
     needsDraw = true;
   }
 
@@ -3298,7 +3337,7 @@ function startBoard() {
         paint.set(linear(green));
         if (height < 0) paint.multiplyScalar(0.8 + 0.2 * (1 + height / 10));   /* darker down in the valleys */
         mesh.setColorAt(made, paint);
-        plants.spots.push({ mesh, index: made, up, green: paint.clone(), frosted: false });
+        plants.spots.push({ mesh, index: made, up, green: paint.clone(), frosted: false, turn: turn.clone(), size });
         made++;
       }
       mesh.count = made;
@@ -3341,6 +3380,7 @@ function startBoard() {
      globe measure the shares. Seeded like the rocks, so everyone online gets the same. */
   const terrain = [];
   terrain.waves = [];
+  terrain.bends = [];
   function layOutTerrain() {
     const rand = seededRandom((rockSeed * 2654435761 + 977) >>> 0);
     const r = radiusMm();
@@ -3394,7 +3434,7 @@ function startBoard() {
       return heading.applyAxisAngle(next, (rand() - 0.5) * 2 * bend);
     };
     const hill = () => {
-      const height = 3 + rand() * (TERRAIN_LIMIT_MM - 3);
+      const height = 3 + rand() * (TERRAIN_HIGH_MM - 3);
       const parts = [];
       const spine = [randomUp()];
       let heading = tangentAt(spine[0]);
@@ -3422,7 +3462,7 @@ function startBoard() {
     const valley = () => {
       let at = randomUp();
       let heading = tangentAt(at);
-      const depth = -(3 + rand() * (TERRAIN_LIMIT_MM - 3));
+      const depth = -(3 + rand() * (TERRAIN_LOW_MM - 3));
       const parts = [];
       const stretches = 2 + Math.floor(rand() * 4);
       const course = [at];
@@ -3454,6 +3494,7 @@ function startBoard() {
     const high = new Float32Array(count);
     const low = new Float32Array(count);
     terrain.length = 0;
+    terrain.bends = [];
     for (const [sign, target, list, other, most, make] of [[1, TERRAIN_HIGH_SHARE, high, low, Math.round(TERRAIN_MAX * 0.6), hill], [-1, TERRAIN_LOW_SHARE, low, high, TERRAIN_MAX, valley]]) {
       let covered = 0;
       for (let tries = 0; tries < (sign > 0 ? 600 : 4000) && covered / count < target && terrain.length < most; tries++) {
@@ -3526,6 +3567,53 @@ function startBoard() {
     places.needsUpdate = true;
     normals.needsUpdate = true;
     geometry.computeBoundingSphere();
+  }
+
+  /* Earth bending: the ground under the piece rises 10 mm, to at most 15 mm, with a
+     small level top and a 1-in-5 slope down to the ground around it. */
+  function bendEarth(piece) {
+    const before = elevation(piece.up);
+    const apex = Math.min(TERRAIN_HIGH_MM, before + EARTH_BEND_MM);
+    if (apex <= before + 0.01) return false;
+    terrain.bends.push({ at: piece.up.clone().normalize(), apex });
+    floatLabel(piece, "Earth bending", "hit heal");
+    return true;
+  }
+  /* After the ground changes shape: the mesh, the rocks, the plants and everything that
+     sits on the ground go back on top of it. */
+  function refreshGround() {
+    const r = radiusMm();
+    raiseGround();
+    shapeRocks();
+    const matrix = new THREE.Matrix4();
+    for (const spot of plants.spots) {
+      matrix.compose(spot.up.clone().multiplyScalar(1 + elevation(spot.up) / r), spot.turn, new THREE.Vector3(spot.size, spot.size, spot.size));
+      spot.mesh.setMatrixAt(spot.index, matrix);
+    }
+    for (const kind of ["grass", "plant"]) if (plants[kind]) plants[kind].instanceMatrix.needsUpdate = true;
+    for (const piece of pieces) poseOnSphere(piece);
+    for (const splat of splats) {
+      splat.mesh.geometry.dispose();
+      splat.mesh.geometry = surfacePatch(splat.spot, SPLAT_SIZE_MM / r, splat.heading);
+    }
+    for (const web of webs) {
+      web.mesh.geometry.dispose();
+      web.mesh.geometry = surfacePatch(web.spot, (web.radius * 2) / r, web.heading || 0);
+    }
+    for (const puddle of puddles) redrawPuddle(puddle);
+    for (const line of wires) if (line.mesh) redrawWire(line);
+    for (const line of rails) if (line.mesh) redrawRail(line);
+    const reseat = (thing) => {
+      const dir = thing.position.clone().normalize();
+      thing.position.copy(dir).multiplyScalar(1 + groundLift(dir));
+    };
+    for (const mushroom of mushrooms) if (mushroom.mesh) reseat(mushroom.mesh);
+    for (const mouth of tunnels) reseat(mouth);
+    for (const mesh of frozen) reseat(mesh);
+    if (ice.lastLand) { ice.lastLand.key = null; showLastLand(); }
+    for (const piece of pieces) drawArrow(piece);
+    if (selected) drawCircle();
+    needsDraw = true;
   }
 
   /* Height of the ground in mm above (or below) the base line. */
@@ -3872,7 +3960,7 @@ function startBoard() {
   /* A bot curling up switches on every ball perk it has that can help. Self Destruct
      stays its own choice. */
   function armBall(piece) {
-    for (const id of ["recuperate", "rolling", "igloo", "darkarts", "pain"]) {
+    for (const id of ["recuperate", "rolling", "igloo", "darkarts", "pain", "earthbend"]) {
       if (hasPerk(piece, id) && perkReady(piece, id)) piece.perksOn.add(id);
     }
   }
@@ -4005,6 +4093,10 @@ function startBoard() {
           if (hasPerk(piece, "pierce") && (nearest.hp <= 25 || Math.random() < 0.2)) piece.perksOn.add("pierce");
           if (hasPerk(piece, "big") && Math.random() < 0.3 && [landing, piece.fire2].every(wideSafe)) piece.perksOn.add("big");
           if (hasPerk(piece, "puddle") && Math.random() < (ice.rock ? 0.5 : 0.2)) piece.perksOn.add("puddle");
+          if (hasPerk(piece, "pushpull") && perkReady(piece, "pushpull") && Math.random() < 0.4) {
+            piece.perksOn.add("pushpull");
+            piece.pushMode = Math.random() < 0.5 ? "push" : "pull";
+          }
           /* Up close, it breathes fire as well, if no teammate is in the way. */
           if (hasPerk(piece, "flame") && gap <= FLAME_RANGE_MM - 5) {
             const frame = flameFrame(piece.up, nearest.up);
@@ -4039,6 +4131,17 @@ function startBoard() {
       if (piece.plan && iceMargin(piece.plan) <= 10) piece.plan = escapeIce(piece, reach) || piece.plan;
       if (piece.plan) botMovePerks(piece, nearest, gap, heading, spotToward);
       if (piece.plan) botRide(piece, nearest);
+      /* Doping: out of reach now, but in reach from where the move ends */
+      if (piece.plan && !piece.fire && nearest && hasPerk(piece, "doping") && perkReady(piece, "doping") && piece.hp > 25 && canFire(piece)) {
+        const from = piece.plan2 || piece.plan;
+        const target = nearest.up.clone();
+        const far = mmBetween(from, target);
+        const friendly = pieces.some((p) => p.team === piece.team && p !== piece && !p.decoy && mmBetween(p.up, target) <= BLAST_RADIUS_MM + 2);
+        if (far <= cannonReach(from, target) - 6 && far > BLAST_RADIUS_MM + 4 && !friendly) {
+          piece.perksOn.add("doping");
+          piece.fire = target;
+        }
+      }
     }
   }
 
@@ -4180,8 +4283,12 @@ function startBoard() {
         piece.fire2 = spot;
         drawArrow(piece);
       } else {
-        if (orderLeg !== "afterFlame") clearOrders(piece);
-        if (orderLeg === "first" && perkOn(piece, "flame")) {
+        if (orderLeg !== "afterFlame") {
+          if (doping(piece)) {
+            piece.fire = piece.fire2 = piece.flameAt = null;   /* keep the move: it fires after it */
+          } else clearOrders(piece);
+        }
+        if (orderLeg === "first" && perkOn(piece, "flame") && !doping(piece)) {
           piece.flameAt = spot;
           drawArrow(piece);
           orderLeg = "afterFlame";
@@ -4490,7 +4597,17 @@ function startBoard() {
     }
     for (const piece of pieces.filter((p) => p.decoyPlan)) sendDecoy(piece);
     const movers = pieces.filter((p) => p.plan);
-    const gunners = pieces.filter((p) => p.fire || p.flameAt);
+    const doped = pieces.filter((p) => !p.decoy && p.plan && p.fire && perkOn(p, "doping") && perkReady(p, "doping") && p.hp > 10);
+    for (const piece of doped) {
+      piece.hp -= 10;
+      showDamage(piece, 10);
+      showHealth(piece);
+      floatLabel(piece, "Doping", "hit");
+      piece.perkTurn.doping = turnState.number;
+      piece.firedTurn = turnState.number;
+      piece.dopeFire = true;
+    }
+    const gunners = pieces.filter((p) => (p.fire || p.flameAt) && !p.dopeFire);
     for (const piece of movers) {
       piece.move = { facing: false };
       piece.moveStart = { up: piece.up.clone(), forward: piece.forward.clone(), curl: piece.curl };
@@ -4501,6 +4618,11 @@ function startBoard() {
       piece.firedTurn = turnState.number;
     }
     /* Rolling up lasts one turn. Unless ordered to roll again, a piece uncurls now. */
+    let bent = false;
+    for (const piece of pieces) {
+      if (piece.roll && !piece.decoy && perkOn(piece, "earthbend") && bendEarth(piece)) bent = true;
+    }
+    if (bent) refreshGround();
     for (const piece of pieces) {
       piece.curlGoal = piece.roll ? 1 : 0;
       if (piece.roll) {
@@ -4669,6 +4791,8 @@ function startBoard() {
       mark: piece.aimMark,
     };
     shell.arc = shell.from.angleTo(shell.target);
+    if (shell.mods.pushpull) piece.perkTurn.pushpull = turnState.number;
+    piece.plainShot = false;
     shell.peak = SHELL_ARC * shell.arc;
     shell.life = (shell.arc * r) / SHELL_SPEED_MM + 0.35;
 
@@ -4847,6 +4971,22 @@ function startBoard() {
     }
   }
 
+  /* +/-: a piece hit is shoved straight away from the blast, or pulled toward it. */
+  function nudge(piece, spot, mm, mode) {
+    if (!pieces.includes(piece) || piece.decoy || piece.digging) return;
+    const away = mmBetween(spot, piece.up);
+    let axis = new THREE.Vector3().crossVectors(spot, piece.up);
+    if (axis.lengthSq() < 1e-12) {
+      if (mode === "pull") return;
+      axis = new THREE.Vector3().crossVectors(piece.up, piece.forward);
+    }
+    axis.normalize();
+    const left = mode === "pull" ? Math.min(mm, away) : mm;
+    if (left < 0.05) return;
+    piece.shove = { axis: mode === "pull" ? axis.negate() : axis, left };
+    piece.knockedTurn = turnState.number;
+  }
+
   /* Every piece near the landing spot is hurt, whichever side it is on. A kill of an
      enemy earns the piece that fired a perk, if it's still alive to take it. */
   function explode(spot, shell) {
@@ -4873,6 +5013,7 @@ function startBoard() {
         turnState.blocks++;
         showDamage(piece, 0);
         if (enemyOf(piece)) awardMedal(piece);
+        if (shell.mods.pushpull) nudge(piece, spot, 5, shell.mods.pushpull);
         continue;
       }
       const damage = ball ? band.ball : band.damage;
@@ -4881,6 +5022,7 @@ function startBoard() {
       turnState.hits++;
       showDamage(piece, damage);
       showHealth(piece);
+      if (shell.mods.pushpull && piece.hp > 0) nudge(piece, spot, ball ? 5 : 10, shell.mods.pushpull);
       if (piece.hp === 0) {
         turnState.kills++;
         squish(piece, shell.shooter);
@@ -6294,9 +6436,9 @@ function startBoard() {
     for (const piece of pieces) {
       if (!piece.decoy && balled(piece) && mmBetween(spot, piece.up) <= radius) packPain(piece, shell);
     }
-    const web = { spot: spot.clone(), radius, age: 0, lastTurn: turnState.number + WEB_EXTRA_TURNS, caught: new Set() };
+    const web = { spot: spot.clone(), radius, age: 0, lastTurn: turnState.number + WEB_EXTRA_TURNS, caught: new Set(), heading: Math.random() * Math.PI * 2 };
     web.mesh = new THREE.Mesh(
-      surfacePatch(web.spot, (radius * 2) / radiusMm(), Math.random() * Math.PI * 2),
+      surfacePatch(web.spot, (radius * 2) / radiusMm(), web.heading),
       new THREE.MeshBasicMaterial({ map: webTexture(), transparent: true, opacity: 0, depthWrite: false })
     );
     globe.add(web.mesh);
@@ -6487,6 +6629,14 @@ function startBoard() {
   }
 
   function stopPiece(piece) {
+    /* Doping: the move is over, so the shot goes now, from here, with no cannon perks */
+    if (piece.dopeFire) {
+      piece.dopeFire = false;
+      if (piece.fire && pieces.includes(piece)) {
+        piece.plainShot = true;
+        piece.shot = { stage: "aim", time: 0, glow: null };
+      }
+    }
     piece.turnOverlap = null;
     piece.move = null;
     piece.plan2 = null;
@@ -6942,7 +7092,8 @@ function startBoard() {
   /* The chance comes first, so a turn with no room is simply a turn with no mushroom. */
   function sproutMushroom() {
     if (rand() >= MUSHROOM_CHANCE) return;
-    const count = rand() < MUSHROOM_PAIR_CHANCE ? 2 : 1;
+    const roll = rand();
+    const count = roll < MUSHROOM_TRIO_CHANCE ? 3 : roll < MUSHROOM_TRIO_CHANCE + MUSHROOM_PAIR_CHANCE ? 2 : 1;
     const sprouted = [];
     for (let n = 0; n < count; n++) {
       for (let tries = 0; tries < MUSHROOM_SPOT_TRIES; tries++) {
@@ -6956,7 +7107,7 @@ function startBoard() {
         break;
       }
     }
-    if (sprouted.length === 2) announce(`Two mushrooms have sprouted! They bloom in ${MUSHROOM_BUD_TURNS} turns.`, sprouted[0]);
+    if (sprouted.length >= 2) announce(`${sprouted.length === 3 ? "Three" : "Two"} mushrooms have sprouted! They bloom in ${MUSHROOM_BUD_TURNS} turns.`, sprouted[0]);
     else if (sprouted.length) announce(`A mushroom has sprouted! It blooms in ${MUSHROOM_BUD_TURNS} turns.`, sprouted[0]);
   }
 
@@ -7275,7 +7426,7 @@ function startBoard() {
      links to other things, which are sent as ids instead. */
   const PIECE_SKIP = new Set(["mesh", "tag", "arrow", "aimMark", "aimMark2", "extraArrows", "legs", "antennae", "curlParts",
     "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "flameMark",
-    "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt", "turnOverlap"]);
+    "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt", "turnOverlap", "dopeFire", "plainShot"]);
   function packPiece(piece) {
     const out = {};
     for (const [key, value] of Object.entries(piece)) {
@@ -7289,7 +7440,7 @@ function startBoard() {
   }
   const ORDER_KEYS = ["plan", "plan2", "decoyPlan", "fire", "fire2", "flameAt", "railPath"];
   const packOrders = (piece) => {
-    const out = { roll: !!piece.roll, perksOn: [...piece.perksOn] };
+    const out = { roll: !!piece.roll, perksOn: [...piece.perksOn], pushMode: piece.pushMode || null };
     for (const key of ORDER_KEYS) out[key] = piece[key] ? packValue(piece[key]) : null;
     return out;
   };
@@ -7310,6 +7461,7 @@ function startBoard() {
         hitBy: [...line.hitBy].filter(([q]) => pieces.includes(q)).map(([q, turn]) => [q.id, turn]), medalTurn: line.medalTurn ?? null })),
       mushrooms: mushrooms.filter((m) => !m.gone).map((m) => ({ up: V(m.up), stage: m.stage, turns: m.turns })),
       frozen: frozen.map((mesh) => mesh.userData.frozenData).filter(Boolean),
+      bends: terrain.bends.map((bend) => ({ at: V(bend.at), apex: bend.apex })),
       ice: { rock: ice.rock ? rocks.indexOf(ice.rock) : -1, future: ice.future ? rocks.indexOf(ice.future) : -1, reach: ice.reach, goal: ice.goal, spreads: ice.spreads, steps: iceSteps },
       picks,
     };
@@ -7464,6 +7616,10 @@ function startBoard() {
     ice.reach = snap.ice.reach;
     ice.goal = snap.ice.goal;
     ice.spreads = snap.ice.spreads;
+    if (snap.bends && !same(snap.bends, terrain.bends.map((bend) => ({ at: V(bend.at), apex: bend.apex })))) {
+      terrain.bends = snap.bends.map((bend) => ({ at: toV(bend.at), apex: bend.apex }));
+      refreshGround();
+    }
     if (Array.isArray(snap.ice.steps)) setIceSteps(snap.ice.steps);
     iceReach.value = ice.rock ? ice.reach : -1e5;
     if (ice.rock && ice.mark) {
@@ -7757,6 +7913,7 @@ function startBoard() {
       for (const key of ORDER_KEYS) piece[key] = order && order[key] ? unpackValue(order[key]) : null;
       piece.roll = !!(order && order.roll);
       piece.perksOn = new Set(order ? order.perksOn : []);
+      piece.pushMode = order && order.pushMode ? order.pushMode : piece.pushMode;
       drawArrow(piece);
     }
     net.done.clear();
