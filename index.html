@@ -4830,16 +4830,21 @@ function startBoard() {
     if ((next === "fire" && !canFire(selected)) || (next === "ball" && !canRoll(selected))) return;
     action = next;
     orderLeg = "first";
+    const piece = selected;
+    /* The piece stays picked, so you can still switch to a move or a shot, or switch on a ball perk. */
     if (next === "ball") {
-      const piece = selected;
       clearOrders(piece);
       piece.roll = true;
       drawArrow(piece);
-      select(null);
+      drawCircle();
       say(perkOn(piece, "selfdestruct")
-        ? "This piece will roll into a ball and self-destruct 2 seconds later. Order another piece, or end your turn."
-        : "This piece will roll into a ball. Order another piece, or end your turn.");
+        ? "This piece will roll into a ball and self-destruct 2 seconds later. Switch on a ball perk, pick Move or Fire cannon instead, or order another piece."
+        : "This piece will roll into a ball. Switch on a ball perk, pick Move or Fire cannon instead, or order another piece.");
       return;
+    }
+    if (piece.roll) {
+      piece.roll = false;   /* changed its mind: no ball after all */
+      drawArrow(piece);
     }
     drawCircle();
     say(orderMessage());
