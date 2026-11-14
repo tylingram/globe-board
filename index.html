@@ -4406,6 +4406,54 @@ function startBoard() {
     }
   }
 
+  /* Bots steer clear of beetles. The beetles' orders are already chosen when the bots
+     think, so a bot knows the line each beetle will charge along. A spot is risky if it
+     is near that line, or close enough to where the beetle ends up to be charged next turn. */
+  const BOT_BEETLE_CLEAR_MM = 30;
+  function beetleLines(piece) {
+    return beetles().filter((b) => !tamedNow(b, piece.team)).map((b) => {
+      const end = b.plan || b.up;
+      const axis = new THREE.Vector3().crossVectors(b.up, end);
+      const span = mmBetween(b.up, end);
+      const dots = [b.up.clone()];
+      if (axis.lengthSq() > 1e-12) {
+        axis.normalize();
+        for (let k = 1; k <= 6; k++) dots.push(b.up.clone().applyAxisAngle(axis, (span * k) / 6 / radiusMm()));
+      }
+      return { beetle: b, dots, end: dots[dots.length - 1] };
+    });
+  }
+  /* mm from a spot to the nearest beetle charge line (Infinity with no beetles) */
+  const beetleRoom = (lines, spot) => Math.min(Infinity, ...lines.flatMap((line) => line.dots.map((d) => mmBetween(d, spot))));
+  const beetleRisky = (lines, spot) => beetleRoom(lines, spot) < BOT_BEETLE_CLEAR_MM
+    || lines.some((line) => mmBetween(line.end, spot) < BEETLE_SIGHT_MM + 5);
+
+  /* Get out of a beetle's way: the reachable spot farthest from every charge line, or
+     curl up (a ball takes no damage from a beetle) if there is nowhere good to go. */
+  function dodgeBeetle(piece, reach, lines, chosen) {
+    const [a, b] = tangentPair(piece.up);
+    const options = [];
+    for (let i = 0; i < 16; i++) {
+      const facing = (i / 16) * Math.PI * 2;
+      const out = a.clone().multiplyScalar(Math.cos(facing)).addScaledVector(b, Math.sin(facing));
+      const axis = new THREE.Vector3().crossVectors(piece.up, out).normalize();
+      for (const mm of [reach, reach * 0.6]) {
+        const spot = piece.up.clone().applyAxisAngle(axis, mm / radiusMm());
+        if (iceMargin(spot) <= BOT_ICE_CLEAR_MM) continue;
+        if (!chosen.every((other) => mmBetween(other, spot) >= PIECE_LENGTH_MM * 1.5)) continue;
+        options.push({ spot, room: Math.min(beetleRoom(lines, spot), 80) + Math.random() * 4 });
+      }
+    }
+    options.sort((x, y) => y.room - x.room);
+    let tried = 0;
+    for (const option of options) {
+      if (option.room < BOT_BEETLE_CLEAR_MM || tried === 6) break;
+      tried++;
+      if (pathIsClear(piece.up, option.spot)) return option.spot;
+    }
+    return null;
+  }
+
   function chooseBotMoves() {
     const chosenBy = {};
     const spotToward = (piece, heading, spread, reachMm) => {
@@ -4421,7 +4469,10 @@ function startBoard() {
       const reach = moveReach(piece);
       const chosen = chosenBy[piece.team] || (chosenBy[piece.team] = []);
       const enemies = pieces.filter((p) => p.team !== piece.team);
-      const nearest = enemies.reduce((a, b) => (piece.up.angleTo(a.up) < piece.up.angleTo(b.up) ? a : b));
+      const tamerReady = hasPerk(piece, "tamer") && perkReady(piece, "tamer");
+      const targets = enemies.filter((p) => p.team !== BEETLE_TEAM || tamerReady);
+      const nearest = (targets.length ? targets : enemies).reduce((a, b) => (piece.up.angleTo(a.up) < piece.up.angleTo(b.up) ? a : b));
+      const lines = beetleLines(piece);
       const gap = mmBetween(piece.up, nearest.up);
       const heading = nearest.up.clone().addScaledVector(piece.up, -nearest.up.dot(piece.up)).normalize();
       const safeTo = (spot) => !pieces.some((p) => p.team === piece.team && !p.decoy && mmBetween(p.up, spot) <= BLAST_RADIUS_MM);
@@ -4440,13 +4491,29 @@ function startBoard() {
         }
       }
 
+      /* A beetle charging through here comes next. */
+      if (beetleRoom(lines, piece.up) < BOT_BEETLE_CLEAR_MM && Math.random() < 0.9) {
+        const away = dodgeBeetle(piece, reach, lines, chosen);
+        if (away) {
+          piece.plan = away;
+          chosen.push(away);
+          botMovePerks(piece, nearest, gap, heading, spotToward);
+          continue;
+        }
+        if (canRoll(piece)) {
+          piece.roll = true;
+          armBall(piece);
+          continue;
+        }
+      }
+
       /* A badly hurt piece heads for a mushroom it could reach within two turns. Any
          piece with a perk left to earn goes for one within a single move. */
       const wantsPerk = piece.perks.length < PERKS.length;
       if (piece.hp <= style.hungryHp || wantsPerk) {
         const hungryReach = piece.hp <= style.hungryHp ? MOVE_RANGE_MM * 2 : reach * style.perkFoodMoves;
         const food = mushrooms
-          .filter((m) => !m.gone && iceMargin(m.up) > 10 && mmBetween(piece.up, m.up) > 0.5 && mmBetween(piece.up, m.up) <= hungryReach)
+          .filter((m) => !m.gone && iceMargin(m.up) > 10 && mmBetween(piece.up, m.up) > 0.5 && mmBetween(piece.up, m.up) <= hungryReach && !beetleRisky(lines, m.up))
           .sort((a, b) => mmBetween(piece.up, a.up) - mmBetween(piece.up, b.up))[0];
         if (food) {
           const axis = new THREE.Vector3().crossVectors(piece.up, food.up).normalize();
@@ -4463,7 +4530,7 @@ function startBoard() {
       if (hasPerk(piece, "melee") && perkReady(piece, "melee") && gap > 8 && gap <= reach && Math.random() < style.melee) {
         const axis = new THREE.Vector3().crossVectors(piece.up, nearest.up).normalize();
         const past = piece.up.clone().applyAxisAngle(axis, Math.min(reach, gap + 6) / radiusMm());
-        if (iceMargin(past) > style.iceRun && pathIsClear(piece.up, past)) {
+        if (iceMargin(past) > style.iceRun && !beetleRisky(lines, past) && pathIsClear(piece.up, past)) {
           piece.plan = past;
           piece.perksOn.add("melee");
           /* A charge at double speed, maybe with a fake alongside. */
@@ -4566,6 +4633,7 @@ function startBoard() {
           spot = spotToward(piece, way, tries < 12 ? 1.6 : 6.28, reach * stride * (0.5 + Math.random() * 0.5));
           const apart = chosen.every((other) => mmBetween(other, spot) >= PIECE_LENGTH_MM * 1.5);
           const webbed = webs.some((web) => mmBetween(web.spot, spot) <= web.radius);
+          if (tries < 22 && beetleRisky(lines, spot)) continue;
           if (apart && !webbed && iceMargin(spot) > BOT_ICE_CLEAR_MM && pathIsClear(piece.up, spot)) break;
         }
         piece.plan = spot;
