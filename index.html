@@ -3298,7 +3298,7 @@ function startBoard() {
 
   /* Where a piece is, or will be once its move is done. */
   const finalSpot = (piece) => piece.plan || piece.up;
-  const spotTaken = (spot) => pieces.some((p) => mmBetween(finalSpot(p), spot) < PIECE_LENGTH_MM);
+  const spotTaken = (spot) => pieces.some((p) => mmBetween(finalSpot(p), spot) < PIECE_LENGTH_MM * (1 + (p.size || 1)) / 2);
 
   function surfaceAt(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
@@ -4107,7 +4107,7 @@ function startBoard() {
   function placePiece(spot) {
     if (yours().length >= MAX_PIECES) return;
     if (spotTaken(spot)) {
-      say("That spot is taken. Pick a spot at least 10 mm from another piece.");
+      say("That spot is taken. Pick a spot farther from the other pieces.");
       return;
     }
     /* New pieces face the top of the screen. */
@@ -4128,7 +4128,7 @@ function startBoard() {
     if (yours().length === MAX_PIECES) {
       placementOver = true;
       startTimer();
-      placeBotPieces();
+      if (!pieces.some((p) => !humanTeams.has(p.team))) placeBotPieces();
       sproutMushroom();
       startBotThinking();
     }
@@ -4209,6 +4209,21 @@ function startBoard() {
       for (const spot of spots) addPiece(team, spot, facingAt(spot));
     }
     spawnBeetles();
+  }
+
+  /* Offline, the bots' pieces and the beetles are on the board before you place yours,
+     and are set out afresh whenever a setting changes until your last piece is down. */
+  function setOutBots() {
+    if (online() || placementOver) return;
+    for (const piece of pieces.filter((p) => !humanTeams.has(p.team))) {
+      if (piece.record) roster.splice(roster.indexOf(piece.record), 1);
+      piece.record = null;
+      removePiece(piece);
+    }
+    placeBotPieces();
+    drawBoards();
+    say(idleMessage());
+    needsDraw = true;
   }
 
   /* Each beetle makes its home on a hill: one of the hills' high points, clear of rock
@@ -5355,6 +5370,22 @@ function startBoard() {
 
   /* Every piece near the landing spot is hurt, whichever side it is on. A kill of an
      enemy earns the piece that fired a perk, if it's still alive to take it. */
+  /* How far a blast is from a piece in mm. A beetle is big, so it counts from the
+     nearest part of its body: a blast that reaches any of it hits it in full. */
+  function blastDistance(spot, piece) {
+    if (piece.team !== BEETLE_TEAM) return mmBetween(spot, piece.up);
+    const r = radiusMm();
+    const size = piece.size || 1;
+    const halfWidth = PIECE_HALF_WIDTH_MM * size;
+    const reach = (PIECE_LENGTH_MM / 2) * size - halfWidth;   /* centre to the middle of each end */
+    let least = Infinity;
+    for (let k = -8; k <= 8; k++) {
+      const point = piece.up.clone().addScaledVector(piece.forward, (k / 8) * reach / r).normalize();
+      least = Math.min(least, mmBetween(spot, point));
+    }
+    return Math.max(0, least - halfWidth);
+  }
+
   function explode(spot, shell) {
     const piercing = shell.mods.pierce;
     const bands = shell.bands || shellBands(shell.mods);
@@ -5363,7 +5394,7 @@ function startBoard() {
     addBlast(spot, bands[bands.length - 1].within, 0.8, true);
     sound.explosion(bands[bands.length - 1].within / 40, !!shell.mods.web && !shell.mods.pierce && !shell.mods.big && !shell.self);
     for (const piece of [...pieces]) {
-      const distance = mmBetween(spot, piece.up);
+      const distance = blastDistance(spot, piece);
       const band = bands.find((b) => distance <= b.within);
       if (!band) continue;
       if (shell.self && piece === shell.shooter) continue;
@@ -7684,6 +7715,7 @@ function startBoard() {
       button("Play again", () => {
         resultsBox.hidden = true;
         clearPieces();
+        setOutBots();
       }, true);
     }
     resultsNote.textContent = note;
@@ -7786,8 +7818,8 @@ function startBoard() {
     updateScaleBar();
     needsDraw = true;
   }
-  diameterInput.addEventListener("input", () => setDiameter(Number(diameterInput.value)));
-  botInput.addEventListener("input", () => setBotCount(Number(botInput.value)));
+  diameterInput.addEventListener("input", () => { setDiameter(Number(diameterInput.value)); setOutBots(); });
+  botInput.addEventListener("input", () => { setBotCount(Number(botInput.value)); setOutBots(); });
   /* A new setting starts the clock over at the new length. */
   function setTimerLimit(seconds) {
     turnTimer.limit = seconds;
@@ -7801,7 +7833,7 @@ function startBoard() {
     beetleInput.value = beetleCount;
     beetleValue.textContent = beetleCount;
   }
-  beetleInput.addEventListener("input", () => setBeetleCount(beetleInput.value));
+  beetleInput.addEventListener("input", () => { setBeetleCount(beetleInput.value); setOutBots(); });
   function setIceSteps(steps) {
     iceSteps = steps.map((mm) => Math.min(40, Math.max(5, Math.round(Number(mm) || 0))));
     iceSteps.forEach((mm, i) => {
@@ -7824,7 +7856,7 @@ function startBoard() {
     say(idleMessage());
   });
   doneButton.addEventListener("click", endTurn);
-  clearButton.addEventListener("click", clearPieces);
+  clearButton.addEventListener("click", () => { clearPieces(); setOutBots(); });
   document.getElementById("reset").addEventListener("click", resetView);
 
   /* ---------- Online play ----------
@@ -8222,6 +8254,7 @@ function startBoard() {
     localTeam = "you";
     clearPieces();
     setBotCount(Number(botInput.value));
+    setOutBots();
     document.getElementById("youDot").style.background = "var(--team-you)";
     document.querySelectorAll(".names .dot").forEach((dot) => { dot.style.background = "var(--team-you)"; });
     onlineChip.textContent = "Back in the room for another game.";
@@ -8636,6 +8669,7 @@ function startBoard() {
   diameterValue.textContent = board.diameter + " mm";
   clearPieces();
   setBotCount(Number(botInput.value));
+  setOutBots();
 
   new ResizeObserver(resize).observe(stage);
   resize();
