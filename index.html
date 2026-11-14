@@ -124,6 +124,36 @@ input[type="range"] { width: 100%; margin: 0; accent-color: var(--brass); }
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
 }
 .picker[hidden] { display: none; }
+/* The perk book: a button in the top-right corner, and a page listing every perk. */
+.book-button {
+  position: absolute;
+  top: 16px;
+  right: calc(16px + env(safe-area-inset-right, 0px));
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  color: var(--ink);
+  background: rgba(239, 229, 207, 0.94);
+  border: none;
+  border-radius: 3px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+.book-button:hover { background: var(--card); }
+.book-button:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+.book-button svg { width: 22px; height: 22px; }
+.picker.book { z-index: 6; width: min(560px, calc(100% - 32px)); max-height: calc(100% - 32px); }
+.book-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.book-head button { width: 30px; height: 30px; padding: 0; font-size: 1.2rem; line-height: 1; }
+.book-list { display: flex; flex-direction: column; gap: 4px; }
+.book-list .perk-group-label { margin-top: 10px; }
+.book-type-note { margin: 0 0 2px; font-size: 0.78rem; color: var(--ink-soft); }
+.book-perk { padding: 6px 0; border-top: 1px solid var(--rule); }
+.book-perk h3 { margin: 0 0 2px; font-size: 0.9rem; font-weight: 700; }
+.book-perk p { margin: 0; font-size: 0.82rem; line-height: 1.4; }
 /* The perk choice sits in the bottom-left corner, above the scale bar, so the map stays in view. */
 #picker {
   top: auto;
@@ -177,7 +207,7 @@ input[type="range"] { width: 100%; margin: 0; accent-color: var(--brass); }
 .names label { display: flex; align-items: center; gap: 8px; font-size: 0.86rem; }
 .names input { flex: 1; min-width: 0; font: inherit; font-size: 0.86rem; padding: 5px 8px; color: var(--ink); background: #fbf6ea; border: 1.5px solid var(--rule); border-radius: 3px; }
 .names input:focus { border-color: var(--brass); outline: none; }
-.boards { position: absolute; top: 16px; right: 16px; width: 200px; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.boards { position: absolute; top: 60px; right: 16px; width: 200px; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
 .board { padding: 8px 10px; background: rgba(239, 229, 207, 0.94); color: var(--ink); border-radius: 3px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3); }
 .board h3 { margin: 0 0 4px; font-family: var(--font-display); font-size: 0.92rem; font-weight: 400; }
 .board ol { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; }
@@ -555,6 +585,16 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
     <div class="marks" id="marks" aria-hidden="true"></div>
     <div class="news" id="news"></div>
     <section class="board squad-card" aria-label="Your pieces"><h3>Your pieces</h3><div class="squad" id="squad"></div></section>
+    <button type="button" class="book-button" id="bookButton" aria-label="All perks" title="All perks" aria-haspopup="dialog">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 6.5C10.2 5 7.6 4.5 4 4.5v13c3.6 0 6.2.5 8 2 1.8-1.5 4.4-2 8-2v-13c-3.6 0-6.2.5-8 2z"/>
+        <path d="M12 6.5v13"/>
+      </svg>
+    </button>
+    <div class="picker book" id="perkBook" role="dialog" aria-labelledby="bookTitle" hidden>
+      <div class="book-head"><h2 id="bookTitle">All perks</h2><button type="button" id="bookClose" aria-label="Close">&times;</button></div>
+      <div class="book-list" id="bookList"></div>
+    </div>
     <div class="boards" aria-label="Leaderboards">
       <section class="board"><h3>Most kills</h3><ol id="killBoard"></ol></section>
       <section class="board"><h3>Most medals</h3><ol id="medalBoard"></ol></section>
@@ -4922,6 +4962,43 @@ function startBoard() {
   document.getElementById("devAll").addEventListener("click", () => devList.querySelectorAll("input").forEach((box) => { box.checked = true; }));
   document.getElementById("devNone").addEventListener("click", () => devList.querySelectorAll("input").forEach((box) => { box.checked = false; }));
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !devPicker.hidden) devPicker.hidden = true; });
+
+  /* ---------- The perk book ---------- */
+  const perkBook = document.getElementById("perkBook");
+  const bookButton = document.getElementById("bookButton");
+  function openBook() {
+    const list = document.getElementById("bookList");
+    list.textContent = "";
+    for (const type of PERK_TYPES) {
+      const label = document.createElement("span");
+      label.className = "perk-group-label";
+      label.textContent = type.name;
+      const note = document.createElement("p");
+      note.className = "book-type-note";
+      note.textContent = type.text;
+      list.append(label, note);
+      for (const perk of PERKS.filter((x) => x.type === type.id)) {
+        const item = document.createElement("section");
+        item.className = "book-perk";
+        const name = document.createElement("h3");
+        name.textContent = perk.name;
+        const text = document.createElement("p");
+        text.textContent = perk.text;
+        item.append(name, text);
+        list.append(item);
+      }
+    }
+    perkBook.hidden = false;
+    perkBook.scrollTop = 0;
+    document.getElementById("bookClose").focus();
+  }
+  function closeBook() {
+    perkBook.hidden = true;
+    bookButton.focus();
+  }
+  bookButton.addEventListener("click", () => (perkBook.hidden ? openBook() : closeBook()));
+  document.getElementById("bookClose").addEventListener("click", closeBook);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !perkBook.hidden) closeBook(); });
 
   const sidesStanding = () => [...new Set(pieces.filter((p) => !p.decoy && p.team !== BEETLE_TEAM).map((p) => p.team))];   /* beetles aren't a side */
   const sidesLeft = () => sidesStanding().length;
