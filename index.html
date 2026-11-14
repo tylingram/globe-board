@@ -124,6 +124,15 @@ input[type="range"] { width: 100%; margin: 0; accent-color: var(--brass); }
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
 }
 .picker[hidden] { display: none; }
+/* The perk choice sits in the bottom-left corner, above the scale bar, so the map stays in view. */
+#picker {
+  top: auto;
+  left: calc(16px + env(safe-area-inset-left, 0px));
+  bottom: 64px;
+  translate: none;
+  width: min(340px, calc(100% - 32px));
+  max-height: calc(100% - 96px);
+}
 .lobby { z-index: 5; width: min(420px, calc(100% - 32px)); }
 .lobby .note { margin: 0; }
 .lobby input { font: inherit; padding: 8px 10px; color: var(--ink); background: #fbf6ea; border: 1.5px solid var(--rule); border-radius: 3px; }
