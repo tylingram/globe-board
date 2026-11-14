@@ -985,8 +985,8 @@ const PERKS = [
   { id: "pushpull", type: "fire", cools: 2, name: "+/-", text: "Tap to switch it on as Push, tap again for Pull. Every piece the shell hurts is shoved 10 mm straight away from where it lands, or pulled 10 mm toward it; a piece rolled into a ball takes no damage but still moves 5 mm. Then it needs 2 turns before it can be used again." },
   { id: "doping", type: "move", cools: 2, name: "Doping", text: "Costs 10 HP. Give the piece a move, then aim its shot: it moves, then fires from where it ends up, with no cannon perks. Needs more than 10 HP. Then it needs 2 turns before it can be used again." },
   { id: "secondchance", type: "passive", passive: true, name: "Second Chance", text: "Once: lets the piece fire its cannon two turns in a row, or roll into a ball two turns in a row. The perk is gone as soon as it's used." },
-  { id: "indomitable", type: "fire", passive: true, name: "Indomitable Will", text: "Always on: a direct hit on a turn this piece fires its cannon does 49 damage instead of 50." },
-  { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: that turn, nothing but a cannon shell or the ice can hurt the piece. Then it needs 3 turns before it can be used again." },
+  { id: "indomitable", type: "fire", passive: true, cools: 2, name: "Indomitable Will", text: "Always on: a direct hit on a turn this piece fires its cannon does 49 damage instead of 50. Then it needs 2 turns before it can do that again." },
+  { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: while the piece is moving, nothing but a cannon shell, a Self Destruct or the ice can hurt it. Then it needs 3 turns before it can be used again." },
   { id: "tamer", type: "fire", cools: 2, name: "Beetle Tamer", text: "If this turn's shell hits a beetle, you control that beetle next turn: pick it and send it charging, up to 45 mm. It won't ram your own pieces or hold a grudge for the shot. Then it needs 2 turns before it can be used again." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
@@ -2730,8 +2730,9 @@ function startBoard() {
     piece.perks.splice(piece.perks.indexOf("secondchance"), 1);
     floatLabel(piece, "Second Chance", "hit heal");
   }
-  /* Unstoppable: switched on with this turn's move, only a shell or the ice can hurt it. */
-  const shielded = (piece) => piece.perks.includes("unstoppable") && piece.perkTurn.unstoppable === turnState.number;
+  /* Unstoppable: switched on with this turn's move, while the piece is on the move only a
+     shell, a Self Destruct or the ice can hurt it. */
+  const shielded = (piece) => piece.perks.includes("unstoppable") && piece.perkTurn.unstoppable === turnState.number && (!!(piece.move || piece.ride) || piece.stopSlice === moveSlice);
   let youAreDone = false;
   let placementOver = false;
   let gameOver = false;
@@ -5015,6 +5016,8 @@ function startBoard() {
       piece.perkTurn.unstoppable = turnState.number;
       floatLabel(piece, "Unstoppable", "hit heal");
     }
+    moveSlice = 0;
+    for (const piece of pieces) piece.stopSlice = -1;
     burnPieces();
     for (const piece of pieces.filter((p) => p.plan && !p.decoy)) {
       for (const id of piece.perksOn) {
@@ -5460,10 +5463,6 @@ function startBoard() {
         vanish(piece);
         continue;
       }
-      if (shell.self && shielded(piece) && piece !== shell.shooter) {
-        showDamage(piece, 0);
-        continue;
-      }
       const ball = balled(piece);
       if (ball) packPain(piece, shell);
       if (ball && !shell.self) strikeBack(piece, shell.shooter);
@@ -5476,8 +5475,9 @@ function startBoard() {
       }
       let damage = ball ? band.ball : band.damage;
       /* Indomitable Will: firing this turn, a direct hit leaves it at least 1 HP more */
-      if (!shell.self && damage >= DIRECT_HIT_DAMAGE && piece.perks.includes("indomitable") && piece.firedTurn === turnState.number) {
+      if (!shell.self && damage >= DIRECT_HIT_DAMAGE && piece.perks.includes("indomitable") && piece.firedTurn === turnState.number && perkReady(piece, "indomitable")) {
         damage = DIRECT_HIT_DAMAGE - 1;
+        piece.perkTurn.indomitable = turnState.number;
         floatLabel(piece, "Indomitable Will", "hit heal");
       }
       if (enemyOf(piece) && piece.team !== BEETLE_TEAM) hurtEnemy = true;
@@ -7129,6 +7129,7 @@ function startBoard() {
   }
 
   function stopPiece(piece) {
+    if (piece.move || piece.ride) piece.stopSlice = moveSlice;   /* hits in this same instant still find it moving */
     /* Doping: the move is over, so the shot goes now, from here, with no cannon perks */
     if (piece.dopeFire) {
       piece.dopeFire = false;
@@ -7443,7 +7444,9 @@ function startBoard() {
   }
 
   /* Each piece turns on the spot to face its target, then crawls straight to it. */
+  let moveSlice = 0;
   function advanceMovers(seconds) {
+    moveSlice++;
     const before = new Map(pieces.map((p) => [p, { up: p.up.clone(), forward: p.forward.clone(), curl: p.curl, size: p.size }]));
     const crawled = new Set();
     for (const piece of [...pieces]) if (piece.strikeAt && !piece.shot) rollAt(piece);
@@ -7982,7 +7985,7 @@ function startBoard() {
      links to other things, which are sent as ids instead. */
   const PIECE_SKIP = new Set(["mesh", "tag", "arrow", "aimMark", "aimMark2", "extraArrows", "legs", "antennae", "curlParts",
     "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "flameMark",
-    "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt", "turnOverlap", "dopeFire", "plainShot", "rammed", "hatMesh"]);
+    "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt", "turnOverlap", "dopeFire", "plainShot", "rammed", "hatMesh", "stopSlice"]);
   function packPiece(piece) {
     const out = {};
     for (const [key, value] of Object.entries(piece)) {
