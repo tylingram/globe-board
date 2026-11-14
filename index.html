@@ -960,7 +960,7 @@ const PERK_TYPES = [
 const PERKS = [
   { id: "tunnel", type: "move", passive: true, name: "Tunneling", text: "Always on: any move into rock digs through it. Sent into a rock, the piece keeps digging until it comes out the other side. Nothing can hurt it while it's underground." },
   { id: "double", type: "move", name: "Double Move", text: "Two moves this turn, at twice the speed. Can't be used two turns in a row.", cools: true },
-  { id: "pierce", type: "fire", name: "Armor Piercing shell", text: "Hits only within 5 mm, but does 30 to a ball, and still 30 with Big shell. Combines with Web and Big shell." },
+  { id: "pierce", type: "fire", name: "Armor Piercing shell", text: "Hits only within 5 mm (10 mm with Big shell): 50 to a piece, 25 to a ball, and the same with Big shell. Combines with Web and Big shell." },
   { id: "web", type: "fire", name: "Web", text: "The shell spins a web 30 mm wide (60 mm with Big shell) that stays for three turns. Anything entering it moves 20 mm at half speed on the following turn. On its own it does 50 on a direct hit, within 5 mm, and 10 within 10 mm; with Armor Piercing or Big shell it does theirs instead." },
   { id: "decoy", type: "move", name: "Decoy", text: "Send a fake copy on a second move. It lasts until next turn. With Barbed Wire or Rail Road on, it lays fake wire or track: real to everyone else, but harmless, and gone when anything touches it or next turn. Can't be used two turns in a row.", cools: true },
   { id: "railroad", type: "move", name: "Rail Road", text: "Lays track behind the piece as it moves, through its tunnels too. Any piece whose move lands on track can then ride anywhere on the joined-up railroad, at 30 mm/s, but can't stop on track inside rock. Can't be used two turns in a row.", cools: true },
@@ -996,7 +996,7 @@ const DIRECT_HIT_MM = 5;             /* any shell landing this close kills a pie
 const DIRECT_HIT_DAMAGE = 50;
 const PIERCE_RADIUS_MM = 5;          /* the whole blast of an armor piercing shell */
 const PIERCE_DAMAGE = 50;            /* to anything inside it */
-const PIERCE_BALL_DAMAGE = 30;       /* to a piece rolled into a ball */
+const PIERCE_BALL_DAMAGE = 25;       /* to a piece rolled into a ball */
 
 /* What a shell does, from the shell perks that are on. They combine:
    Armor Piercing sets the blast to 5 mm, 50 damage, and 25 to a ball.
@@ -1013,7 +1013,7 @@ function shellBands(mods) {
       ? [{ within: PIERCE_RADIUS_MM, damage: PIERCE_DAMAGE, ball: PIERCE_BALL_DAMAGE }]
       : BLAST_DAMAGE.map((band) => ({ ...band, ball: 0 }));
     if (mods.big) {
-      bands = bands.map((band) => ({ within: band.within * 2, damage: Math.ceil(band.damage / 2), ball: mods.pierce ? band.ball : Math.ceil(band.ball / 2) }));
+      bands = bands.map((band) => (mods.pierce ? { ...band, within: band.within * 2 } : { within: band.within * 2, damage: Math.ceil(band.damage / 2), ball: Math.ceil(band.ball / 2) }));
       if (!mods.pierce) bands[bands.length - 1].within -= BIG_OUTER_TRIM_MM;
     }
   }
