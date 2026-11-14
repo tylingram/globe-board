@@ -124,6 +124,7 @@ input[type="range"] { width: 100%; margin: 0; accent-color: var(--brass); }
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
 }
 .picker[hidden] { display: none; }
+.perk-emp { margin: 0 0 4px; font-size: 0.82rem; font-weight: 700; color: #2b7bb9; }
 /* The perk book: a button in the top-left corner, and a page listing every perk. */
 .book-button {
   position: absolute;
@@ -971,6 +972,8 @@ const DARK_ARTS_REACH_MM = 8;        /* how close to a splatter the ball must be
 const IGLOO_SPEED_MM = 25;           /* rolling off the ice, per second */
 const RECUPERATE_HP = 5;
 const SELF_DESTRUCT_SECONDS = 2;
+const EMP_RADIUS_MM = 50;
+const EMP_CHARGE_SECONDS = 0.3;   /* after the piece is a ball */
 const SELF_DESTRUCT_BANDS = [
   { within: 15, damage: 50, ball: 0 },
   { within: 25, damage: 40, ball: 0 },
@@ -1029,6 +1032,7 @@ const PERKS = [
   { id: "indomitable", type: "fire", passive: true, cools: 2, name: "Indomitable Will", text: "Always on: a direct hit on a turn this piece fires its cannon does 49 damage instead of 50. Then it needs 2 turns before it can do that again." },
   { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: while the piece is moving, nothing but a cannon shell, a Self Destruct or the ice can hurt it. Then it needs 3 turns before it can be used again." },
   { id: "tamer", type: "fire", cools: 2, name: "Beetle Tamer", text: "If this turn's shell hits a beetle, you control that beetle next turn: pick it and send it charging, up to 45 mm. It won't ram your own pieces or hold a grudge for the shot. Then it needs 2 turns before it can be used again." },
+  { id: "emp", type: "ball", name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
 const BIG_RADIUS_MM = BLAST_RADIUS_MM * 2;
@@ -2625,10 +2629,22 @@ function startBoard() {
     stepTimer(seconds);
     drawSquad();
     showSwords();
-    if (flames.length || pieces.some((p) => p.fireFx)) needsDraw = true;
+    if (flames.length || pieces.some((p) => p.fireFx || p.sparkFx)) needsDraw = true;
     for (const piece of pieces) {
-      if (!piece.fireFx) continue;
-      piece.fireFx.quaternion.copy(globe.quaternion).multiply(piece.mesh.quaternion).invert().multiply(camera.quaternion);
+      if (piece.fireFx) piece.fireFx.quaternion.copy(globe.quaternion).multiply(piece.mesh.quaternion).invert().multiply(camera.quaternion);
+      if (piece.sparkFx) {
+        /* facing the camera, flickering: a new twist and size every few frames */
+        piece.sparkFx.quaternion.copy(globe.quaternion).multiply(piece.mesh.quaternion).invert().multiply(camera.quaternion);
+        const tick = Math.floor(now / 70);
+        if (piece.sparkFx.userData.tick !== tick) {
+          piece.sparkFx.userData.tick = tick;
+          piece.sparkFx.userData.twist = Math.random() * Math.PI * 2;
+          piece.sparkFx.userData.size = 0.8 + Math.random() * 0.45;
+          piece.sparkFx.visible = Math.random() < 0.85;
+        }
+        piece.sparkFx.rotateZ(piece.sparkFx.userData.twist);
+        piece.sparkFx.scale.setScalar(piece.sparkFx.userData.size);
+      }
     }
     /* Moves advance in fixed steps, whatever the frame rate, so the same orders play
        out the same way in every browser. */
@@ -2763,7 +2779,9 @@ function startBoard() {
   const bot = { ready: false, timer: null };
   /* Firing and rolling each sit out the turn after they are used. They are separate:
      firing doesn't stop a piece rolling next turn, or the other way round. */
-  const canFire = (piece) => piece.team !== BEETLE_TEAM && (turnState.number > piece.firedTurn + 1 || piece.perks.includes("secondchance"));
+  /* Caught by an EMP last turn: no cannon and no perks this turn. */
+  const emped = (piece) => piece.empTurn === turnState.number;
+  const canFire = (piece) => piece.team !== BEETLE_TEAM && !emped(piece) && (turnState.number > piece.firedTurn + 1 || piece.perks.includes("secondchance"));
   const canRoll = (piece) => piece.team !== BEETLE_TEAM && (turnState.number > piece.rolledTurn + 1 || piece.perks.includes("secondchance"));
   /* Second Chance is spent the moment it lets a piece fire, or roll, two turns running. */
   function secondChance(piece, last) {
@@ -2800,6 +2818,7 @@ function startBoard() {
   const hasPerk = (piece, id) => piece.perks.includes(id);
   const perkReady = (piece, id) => {
     const perk = PERKS.find((x) => x.id === id) || {};
+    if (!perk.passive && emped(piece)) return false;
     let wait = typeof perk.cools === "number" ? perk.cools : 1;
     /* Hyped: cannon and ball perks wait one turn less */
     if (typeof perk.cools === "number" && (perk.type === "fire" || perk.type === "ball") && piece.perks.includes("hyped")) wait -= 1;
@@ -3270,6 +3289,13 @@ function startBoard() {
     const owned = selected ? PERKS.filter((perk) => hasPerk(selected, perk.id)) : [];
     perkBox.hidden = !owned.length;
     perkList.textContent = "";
+    if (selected && emped(selected)) {
+      perkBox.hidden = false;
+      const note = document.createElement("p");
+      note.className = "perk-emp";
+      note.textContent = "Recovering from EMP: no cannon or perks this turn.";
+      perkList.appendChild(note);
+    }
     let lastType = null;
     for (const perk of [...owned].sort((a, b) => PERK_TYPES.findIndex((t) => t.id === a.type) - PERK_TYPES.findIndex((t) => t.id === b.type))) {
       if (perk.type !== lastType) {
@@ -3288,7 +3314,9 @@ function startBoard() {
       const name = document.createElement("span");
       name.textContent = perk.id === "pain" && painReady(selected) ? `${perk.name}: two shots this turn`
         : perk.id === "pushpull" && perkOn(selected, perk.id) ? `${perk.name}: ${selected.pushMode === "pull" ? "Pull" : "Push"}`
-        : perk.passive || ready ? perk.name : `${perk.name}: cooling down`;
+        : perk.passive || ready ? perk.name
+        : emped(selected) ? `${perk.name}: recovering from EMP`
+        : `${perk.name}: cooling down`;
       const about = document.createElement("small");
       about.textContent = perk.text;
       button.append(name, about);
@@ -4408,6 +4436,18 @@ function startBoard() {
     for (const id of ["recuperate", "rolling", "igloo", "darkarts", "pain", "earthbend"]) {
       if (hasPerk(piece, id) && perkReady(piece, id)) piece.perksOn.add(id);
     }
+    if (hasPerk(piece, "emp") && perkReady(piece, "emp") && empWorth(piece)) piece.perksOn.add("emp");
+  }
+  /* An EMP is worth it when it would catch more enemies than teammates. */
+  function empWorth(piece) {
+    let foes = 0, friends = 0;
+    for (const p of pieces) {
+      if (p === piece || p.decoy || p.team === BEETLE_TEAM || balled(p)) continue;
+      if (mmBetween(piece.up, p.up) > EMP_RADIUS_MM - 5) continue;
+      if (p.team === piece.team) friends++;
+      else foes++;
+    }
+    return foes > friends;
   }
 
   /* Bots steer clear of beetles. The beetles' orders are already chosen when the bots
@@ -4574,6 +4614,13 @@ function startBoard() {
           piece.perksOn.add("selfdestruct");
           continue;
         }
+      }
+
+      /* With enemies close by, an EMP shuts their cannons down for a turn. */
+      if (hasPerk(piece, "emp") && perkReady(piece, "emp") && canRoll(piece) && empWorth(piece) && Math.random() < 0.6) {
+        piece.roll = true;
+        armBall(piece);
+        continue;
       }
 
       /* Under threat it may curl up, more readily when hurt. */
@@ -5088,6 +5135,7 @@ function startBoard() {
     /* Perks last one turn. Decoys stay until the next turn plays. */
     for (const piece of pieces) {
       piece.perksOn.clear();
+      if (piece.sparkFx && !(piece.empTurn >= turnState.number)) setSparks(piece, false);
       piece.digging = false;
       piece.digStart = null;
       piece.rolledInto = null;
@@ -5168,6 +5216,10 @@ function startBoard() {
     for (const decoy of pieces.filter((p) => p.decoy)) removePiece(decoy);
     removeRailLines(rails.filter((line) => line.fake));
     for (const line of wires.filter((w) => w.fake)) removeWire(line);
+    for (const piece of pieces.filter(emped)) {
+      piece.perksOn.clear();
+      piece.fire = piece.fire2 = piece.flameAt = null;
+    }
     for (const piece of pieces.filter((p) => p.plan && !p.decoy && perkOn(p, "unstoppable") && perkReady(p, "unstoppable"))) {
       piece.perkTurn.unstoppable = turnState.number;
       floatLabel(piece, "Unstoppable", "hit heal");
@@ -5227,6 +5279,7 @@ function startBoard() {
           floatLabel(piece, "+" + RECUPERATE_HP, "hit heal");
         }
         if (perkOn(piece, "selfdestruct")) piece.boom = { time: 0, glow: null };
+        if (perkOn(piece, "emp") && !piece.decoy) piece.emp = { time: 0 };
       }
     }
     moving = movers.length + gunners.length > 0 || pieces.some((p) => p.curl !== p.curlGoal) || !!ice.rock;
@@ -5416,10 +5469,10 @@ function startBoard() {
   }
   const shellTrailPaint = new THREE.LineBasicMaterial({ color: linear("#ff8a1f"), transparent: true, opacity: 0.85 });
 
-  function addBlast(spot, radiusInMm, life, onGround) {
+  function addBlast(spot, radiusInMm, life, onGround, paint = { ball: "#ff9a2e", floor: "#f0531c" }) {
     const r = radiusMm();
     const ball = new THREE.Mesh(glowShape, new THREE.MeshBasicMaterial({
-      color: linear("#ff9a2e"), transparent: true, opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending,
+      color: linear(paint.ball), transparent: true, opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending,
     }));
     ball.position.copy(spot).normalize().multiplyScalar(1 + groundLift(spot));
     ball.scale.setScalar(0.001);
@@ -5427,7 +5480,7 @@ function startBoard() {
     const blast = { ball, radius: radiusInMm / r, age: 0, life, floor: null };
     if (onGround) {
       blast.floor = new THREE.Mesh(capGeometry(spot, 0, radiusInMm / r), new THREE.MeshBasicMaterial({
-        color: linear("#f0531c"), transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide,
+        color: linear(paint.floor), transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide,
       }));
       globe.add(blast.floor);
     }
@@ -5456,6 +5509,8 @@ function startBoard() {
       drawBoards();
     }
     if (piece.fireFx) setOnFire(piece, false);
+    if (piece.sparkFx) setSparks(piece, false);
+    piece.emp = null;
     if (piece.sword) piece.sword.visible = false;
     if (piece.shot && piece.shot.glow) piece.mesh.remove(piece.shot.glow);
     if (piece.boom && piece.boom.glow) piece.mesh.remove(piece.boom.glow);
@@ -6768,6 +6823,47 @@ function startBoard() {
     needsDraw = true;
   }
 
+  /* Static sparks crackling round a piece caught by an EMP. */
+  const sparkShape = new THREE.PlaneGeometry(0.9, 0.9);
+  const sparkMaterial = (() => {
+    const paper = document.createElement("canvas");
+    paper.width = paper.height = 128;
+    const pen = paper.getContext("2d");
+    pen.strokeStyle = "#e8f8ff";
+    pen.shadowColor = "#5cc8ff";
+    pen.shadowBlur = 8;
+    pen.lineWidth = 3;
+    pen.lineJoin = "round";
+    for (let k = 0; k < 7; k++) {
+      const a = (k / 7) * Math.PI * 2 + 0.4 * Math.sin(k * 3.1);
+      let x = 64 + Math.cos(a) * 26, y = 64 + Math.sin(a) * 26;
+      pen.beginPath();
+      pen.moveTo(x, y);
+      for (let j = 1; j <= 4; j++) {
+        const d = 26 + j * 8;
+        const kink = (j % 2 ? 1 : -1) * 0.22;
+        x = 64 + Math.cos(a + kink) * d;
+        y = 64 + Math.sin(a + kink) * d;
+        pen.lineTo(x, y);
+      }
+      pen.stroke();
+    }
+    const texture = new THREE.CanvasTexture(paper);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    return new THREE.MeshBasicMaterial({ map: texture, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+  })();
+  function setSparks(piece, on) {
+    if (on && !piece.sparkFx) {
+      piece.sparkFx = new THREE.Mesh(sparkShape, sparkMaterial);
+      piece.sparkFx.position.set(0, 0.3, 0);
+      piece.mesh.add(piece.sparkFx);
+    } else if (!on && piece.sparkFx) {
+      piece.mesh.remove(piece.sparkFx);
+      piece.sparkFx = null;
+    }
+    needsDraw = true;
+  }
+
   function setOnFire(piece, on) {
     if (on && !piece.fireFx) {
       piece.fireFx = new THREE.Mesh(burnShape, burnMaterial);
@@ -7217,7 +7313,7 @@ function startBoard() {
     needsDraw = true;
     if (flames.length) scorch();
     if (wires.length) snagOnWire();
-    const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS);
+    const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.emp || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS);
     if (busy || shells.length || blasts.length || squishes.length || ghosts.length || terrain.bends.some((bend) => bend.grow < 1)) return;
     /* Once everything else is done, the ice spreads, unless the game is already won. */
     if (ice.rock && !ice.spread && sidesLeft() > 1) {
@@ -7539,6 +7635,14 @@ function startBoard() {
   /* Self Destruct: a red glow grows for 2 seconds once the piece is a ball, then it
      blows up. Its own blast doesn't count as its own kill. */
   function stepBooms(seconds) {
+    for (const piece of pieces) {
+      if (!piece.emp || piece.curl < 1) continue;
+      piece.emp.time += seconds;
+      if (piece.emp.time >= EMP_CHARGE_SECONDS) {
+        piece.emp = null;
+        empPulse(piece);
+      }
+    }
     for (const piece of [...pieces]) {
       const boom = piece.boom;
       if (!boom || piece.curl < 1) continue;
@@ -7564,6 +7668,26 @@ function startBoard() {
         turnState.kills++;
       }
     }
+  }
+
+  /* EMP: a shock wave 50 mm round the ball. Pieces it catches that aren't balls lose
+     their cannon and perks next turn, and crackle with sparks until then. */
+  function empPulse(piece) {
+    addBlast(piece.up.clone(), EMP_RADIUS_MM, 0.7, true, { ball: "#7fd8ff", floor: "#3fa9f5" });
+    floatLabel(piece, "EMP", "hit heal");
+    let caught = 0, yours = 0;
+    for (const other of pieces) {
+      if (other === piece || other.decoy || other.team === BEETLE_TEAM || other.digging) continue;
+      if (other.curlGoal === 1 || balled(other)) continue;
+      if (mmBetween(piece.up, other.up) > EMP_RADIUS_MM) continue;
+      other.empTurn = turnState.number + 1;
+      setSparks(other, true);
+      floatLabel(other, "EMP", "hit");
+      caught++;
+      if (other.team === localTeam) yours++;
+    }
+    if (yours) announce(`EMP: ${yours === 1 ? "a piece" : yours + " pieces"} of yours can't fire or use perks next turn.`, piece.up);
+    else if (caught && piece.team === localTeam) announce(`EMP caught ${caught} piece${caught === 1 ? "" : "s"}.`, piece.up);
   }
 
   /* A piece crawling into a rock stops at the edge and loses the rest of its move.
@@ -8140,7 +8264,7 @@ function startBoard() {
   /* What isn't game state: meshes and labels, the motion of a turn in progress, and
      links to other things, which are sent as ids instead. */
   const PIECE_SKIP = new Set(["mesh", "tag", "arrow", "aimMark", "aimMark2", "extraArrows", "legs", "antennae", "curlParts",
-    "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "flameMark",
+    "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "sparkFx", "emp", "flameMark",
     "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt", "turnOverlap", "dopeFire", "plainShot", "rammed", "hatMesh", "stopSlice"]);
   function packPiece(piece) {
     const out = {};
@@ -8232,6 +8356,7 @@ function startBoard() {
       showHealth(piece);
       piece.tag.classList.toggle("perked", piece.perks.length > 0);
       setOnFire(piece, piece.burnLeft > 0);
+      setSparks(piece, piece.empTurn >= turnState.number);
       drawArrow(piece);
     }
 
