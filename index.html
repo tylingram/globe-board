@@ -20,6 +20,7 @@
   --team-bot3: #d4a017;
   --team-bot4: #7d4fc9;
   --team-bot5: #18a0a8;
+  --team-beetle: #6b4423;
   --danger: #c91f1f;
   --shield: #0a8a86;
   --font-display: "Young Serif", Georgia, serif;
@@ -420,6 +421,15 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
       <div class="ends"><span>5 s</span><span>2 min</span></div>
     </section>
 
+    <section class="group" id="beetleGroup">
+      <div class="count-row">
+        <label class="label" for="beetleCount">Beetles</label>
+        <output class="count" id="beetleCountValue" for="beetleCount">2</output>
+      </div>
+      <input type="range" id="beetleCount" min="1" max="6" step="1" value="2">
+      <div class="ends"><span>1</span><span>6</span></div>
+    </section>
+
     <section class="group" id="iceGroup">
       <span class="label">Ice spread per turn</span>
       <div class="count-row">
@@ -486,6 +496,16 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
     <section class="group">
       <span class="label">Mushrooms</span>
       <p class="note">One may sprout on any turn, far from every piece. It blooms two turns later, and the first piece to touch it then chooses: a full heal or a random perk. (Only kills and medals of valor let you pick which perk.) If nobody does within 3 turns, it wilts.</p>
+    </section>
+
+    <section class="group">
+      <span class="label">Beetles</span>
+      <p class="note">Rhinoceros beetles, three times a piece's size with 150 HP, each guard a hill. A beetle charges any piece within 50 mm, ploughing straight through and doing 25 damage to everything it runs into and knocking it 20 mm out to the side (a ball takes no damage), and it chases whoever shoots it. It gives up a chase once it is 100 mm outside its territory and heads home. It heals 5 HP a turn. Hurting one earns no medals; killing one earns 3 perks.</p>
+    </section>
+
+    <section class="group">
+      <span class="label">Hills and valleys</span>
+      <p class="note">The ground rises up to 15 mm and dips down to 10 mm, shown by contour lines every 1 mm (a darker one every 5 mm). A cannon reaches 100 mm plus the shooter's height minus the target's: from a 10 mm hill it reaches 110 mm onto level ground and 120 mm into a 10 mm valley, but only 90 mm from level ground up onto that hill. The flame's reach stays 75 mm.</p>
     </section>
 
     <section class="group">
@@ -615,6 +635,135 @@ const GROUND_SHADER = `
   }
 `;
 
+/* ---------- Hills and valleys ----------
+   Each feature is a level top (a dome, or a ridge along a short arc) with a straight
+   slope down to the base line, or the same upside down for a valley. Where hills meet,
+   the higher one wins; hills and valleys never touch, so every slope stays between
+   1 mm in 3 and 1 mm in 10. The same sum runs here and in the ground shader. */
+const TERRAIN_MAX = 320;       /* lumps, spurs and valley stretches on the globe, at most */
+const TERRAIN_HIGH_MM = 15;    /* the highest the ground can rise */
+const TERRAIN_LOW_MM = 10;     /* the deepest a valley goes */
+const EARTH_BEND_MM = 10;      /* how far Earth bending raises the ground under a ball */
+const BEND_GRADE = 0.2;        /* its slope down: 1 mm in 5 */
+const BEND_TOP_MM = 3;         /* the level top it leaves under the piece */
+const EARTH_BEND_SECONDS = 3;  /* how long the ground takes to rise */
+const TERRAIN_HIGH_SHARE = 0.35;   /* of the globe above the base line */
+const TERRAIN_LOW_SHARE = 0.15;    /* and below it; the rest stays level */
+const TERRAIN_STEEP = 1 / 3;       /* slopes run between 1 mm in 3 */
+const TERRAIN_GENTLE = 1 / 10;     /* and 1 mm in 10 */
+const TERRAIN_WAVES = 5;           /* low waves that make the outlines wander and wiggle */
+const TERRAIN_WAVE_SLOPE = 0.055;  /* each wave tilts a slope by at most this much */
+
+/* ---------- Hills and valleys ----------
+   Each piece of ground is a lump (or a spur along a short arc) with a small level top
+   and a straight slope down to the base line; a valley stretch is the same upside down.
+   Hills are clusters of lumps and spurs; valleys wind in a chain of stretches. Where
+   pieces of the same kind meet, the higher (or deeper) wins, and hills and valleys
+   never touch. A few long, low waves nudge every distance, so the outlines wander. The
+   slopes are chosen so that, waves and all, every grade stays between 1 in 3 and 1 in
+   10. Heights are worked out here, once per point of the ground mesh, and the graphics
+   card blends between points; that is plenty for contour lines every 1 mm. */
+/* A piece of ground: { a, b, top, width, height }, made ready
+   by prepareTerrainPiece for a sphere of a given radius. */
+function prepareTerrainPiece(f, radiusMm, waveMm) {
+  f.single = f.a.dot(f.b) > 0.999999;
+  if (f.single) f.b = f.a.clone();
+  f.n = f.single ? new THREE.Vector3() : new THREE.Vector3().crossVectors(f.a, f.b).normalize();
+  f.na = new THREE.Vector3().crossVectors(f.n, f.a);
+  f.bn = new THREE.Vector3().crossVectors(f.b, f.n);
+  f.c = f.a.clone().add(f.b).normalize();
+  f.cosReach = Math.cos(Math.min(Math.PI, f.a.angleTo(f.b) / 2 + (f.top + f.width + waveMm + 0.5) / radiusMm));
+  return f;
+}
+function terrainWave(waves, x, y, z) {
+  let sum = 0;
+  for (const w of waves) sum += w.amp * Math.sin(w.freq * (w.k.x * x + w.k.y * y + w.k.z * z) + w.phase);
+  return sum;
+}
+function terrainPieceHeight(f, x, y, z, wave, radiusMm) {
+  if (f.c.x * x + f.c.y * y + f.c.z * z < f.cosReach) return 0;
+  const da = Math.max(-1, Math.min(1, f.a.x * x + f.a.y * y + f.a.z * z));
+  let angle;
+  if (f.single) angle = Math.acos(da);
+  else if (f.na.x * x + f.na.y * y + f.na.z * z >= 0 && f.bn.x * x + f.bn.y * y + f.bn.z * z >= 0) {
+    angle = Math.asin(Math.min(1, Math.abs(f.n.x * x + f.n.y * y + f.n.z * z)));
+  } else {
+    angle = Math.min(Math.acos(da), Math.acos(Math.max(-1, Math.min(1, f.b.x * x + f.b.y * y + f.b.z * z))));
+  }
+  const out = angle * radiusMm + wave - f.top;
+  const tall = Math.abs(f.height);
+  const drop = out <= 0 ? 0
+    : out < f.w1 ? out * (f.d1 / f.w1)
+    : out < f.w1 + f.w2 ? f.d1 + (out - f.w1) * ((f.d2 - f.d1) / f.w2)
+    : f.d2 + (out - f.w1 - f.w2) * ((tall - f.d2) / Math.max(f.width - f.w1 - f.w2, 0.001));
+  return Math.sign(f.height) * Math.max(0, tall - drop);
+}
+/* A lookup so each spot only checks the pieces of ground near it: the globe split into
+   cells on the six faces of a cube, each listing the pieces that can reach into it. */
+const TERRAIN_CELLS = 16;
+function terrainCell(x, y, z) {
+  const ax = Math.abs(x), ay = Math.abs(y), az = Math.abs(z);
+  let face, u, v, m;
+  if (ax >= ay && ax >= az) { face = x > 0 ? 0 : 1; u = y; v = z; m = ax; }
+  else if (ay >= az) { face = y > 0 ? 2 : 3; u = x; v = z; m = ay; }
+  else { face = z > 0 ? 4 : 5; u = x; v = y; m = az; }
+  const n = TERRAIN_CELLS;
+  const i = Math.min(n - 1, Math.floor(((u / m + 1) / 2) * n));
+  const j = Math.min(n - 1, Math.floor(((v / m + 1) / 2) * n));
+  return (face * n + i) * n + j;
+}
+function indexTerrain(features) {
+  const n = TERRAIN_CELLS;
+  const cells = Array.from({ length: 6 * n * n }, () => []);
+  const centre = new THREE.Vector3();
+  for (let face = 0; face < 6; face++) {
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        const u = ((i + 0.5) / n) * 2 - 1, v = ((j + 0.5) / n) * 2 - 1, sign = face % 2 ? -1 : 1;
+        if (face < 2) centre.set(sign, u, v); else if (face < 4) centre.set(u, sign, v); else centre.set(u, v, sign);
+        centre.normalize();
+        const list = cells[(face * n + i) * n + j];
+        for (const f of features) {
+          if (centre.dot(f.c) >= Math.cos(Math.min(Math.PI, Math.acos(Math.min(1, f.cosReach)) + 0.13))) list.push(f);
+        }
+      }
+    }
+  }
+  return cells;
+}
+function terrainHeightAt(features, waves, x, y, z, radiusMm) {
+  const length = Math.sqrt(x * x + y * y + z * z) || 1;
+  x /= length; y /= length; z /= length;
+  const list = features.cells ? features.cells[terrainCell(x, y, z)] : features;
+  let height = 0;
+  if (list.length) {
+    const wave = terrainWave(waves, x, y, z);
+    let high = 0;
+    let low = 0;
+    for (const f of list) {
+      const h = terrainPieceHeight(f, x, y, z, wave, radiusMm);
+      if (h > 0) high = Math.max(high, h); else if (h < 0) low = Math.min(low, h);
+    }
+    height = high + low;
+  }
+  return bentHeight(features.bends, x, y, z, radiusMm, height);
+}
+/* Earth bending: a raised cone over the ground, the higher of the two wins. (x, y, z) is a unit direction. */
+function bentHeight(bends, x, y, z, radiusMm, height) {
+  for (const bend of bends || []) {
+    const d = Math.acos(Math.max(-1, Math.min(1, bend.at.x * x + bend.at.y * y + bend.at.z * z))) * radiusMm;
+    const raised = bend.apex * (bend.grow ?? 1) - Math.max(0, d - BEND_TOP_MM) * BEND_GRADE;
+    if (raised > height) height = raised;
+  }
+  return height;
+}
+/* How far the ground stands above the base sphere under a direction, in sphere radii.
+   Everything that sits on the ground adds this. Set once the hills are laid out. */
+let groundLift = () => 0;
+function onGround(v, lift) {
+  return v.multiplyScalar(lift + groundLift(v));
+}
+
 const GROUND_PAINT = { name: "ground", low: "#5f4228", high: "#8d6a44", patchLow: "#3f5a24", patchHigh: "#7b9440" };
 const CLIFF_TOP_PAINT = { name: "cliff-top", low: "#a9aaa6", high: "#d6d5cd", patchLow: "#7f8384", patchHigh: "#a3a6a6" };
 
@@ -626,15 +775,16 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
   const material = new THREE.MeshStandardMaterial({ roughness: 0.95, metalness: 0 });
   material.extensions = { derivatives: true };
   material.customProgramCacheKey = () => colors.name;
+  const hills = colors.name === "ground";
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uRadiusMm = radiusMm;
     shader.uniforms.uIceReach = iceReach;
     shader.uniforms.uIceStep = iceStep;
     shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vBallPoint;\nattribute float aIceDist;\nvarying float vIceDist;")
-      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvBallPoint = position;\nvIceDist = aIceDist;");
+      .replace("#include <common>", "#include <common>\nvarying vec3 vBallPoint;\nattribute float aIceDist;\nvarying float vIceDist;" + (hills ? "\nattribute float aElev;\nvarying float vElev;" : ""))
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvBallPoint = position;\nvIceDist = aIceDist;" + (hills ? "\nvElev = aElev;" : ""));
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", "#include <common>\n" + GROUND_SHADER + "\nuniform float uIceReach;\nuniform float uIceStep;\nvarying float vIceDist;")
+      .replace("#include <common>", "#include <common>\n" + GROUND_SHADER + (hills ? "\nvarying float vElev;" : "") + "\nuniform float uIceReach;\nuniform float uIceStep;\nvarying float vIceDist;")
       .replace("#include <color_fragment>", `
         #include <color_fragment>
         vec3 groundMm = normalize(vBallPoint) * uRadiusMm;
@@ -649,10 +799,37 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
 
         /* Moss grows in soft patches with a broken, fuzzy edge. */
         float patches = layeredNoise(groundMm + 120.0, 62.0, mmPerPixel) + clods * 0.09 + grit * 0.05;
-        float moss = smoothstep(0.1, 0.2, patches);
+        float elevation = ${hills ? "vElev" : "0.0"};
+        /* Moss grows only on level ground. */
+        float moss = smoothstep(0.1, 0.2, patches) * (1.0 - smoothstep(0.1, 0.5, abs(elevation)));
         float tuft = layeredNoise(groundMm + 300.0, 2.4, mmPerPixel);
         vec3 mossColor = mix(${literal(colors.patchLow)}, ${literal(colors.patchHigh)}, clamp(0.5 + tuft * 1.1 + blotch * 0.4, 0.0, 1.0));
         diffuseColor.rgb = mix(dirt, mossColor, moss);
+
+        /* Hills and valleys: higher ground a little lighter, lower a little darker, with
+           a contour line every 1 mm and a stronger one every 5 mm. */
+        /* Uphill the ground turns grey and pale, like bare stone; downhill it turns a
+           deeper, darker green. The grain of the dirt still shows through both. */
+        {
+          float up = clamp(elevation / 15.0, 0.0, 1.0);
+          float down = clamp(-elevation / 10.0, 0.0, 1.0);
+          float grain = clamp(0.5 + blotch * 0.9 + clods * 0.55, 0.0, 1.0);
+          vec3 stone = mix(${literal("#8f8b84")}, ${literal("#d9d6cf")}, up) * (0.86 + grain * 0.28);
+          vec3 hollow = mix(${literal("#4d6a2f")}, ${literal("#1d3318")}, down) * (0.85 + grain * 0.3);
+          /* even a small rise or dip changes colour clearly, and it keeps going with height */
+          diffuseColor.rgb = mix(diffuseColor.rgb, stone, smoothstep(0.0, 0.25, up) * 0.5 + up * 0.42);
+          diffuseColor.rgb = mix(diffuseColor.rgb, hollow, smoothstep(0.0, 0.25, down) * 0.5 + down * 0.42);
+        }
+        {
+          float rise = max(fwidth(elevation), 1e-5);
+          float slopeSeen = rise / mmPerPixel;
+          float level = floor(elevation + 0.5);
+          float offPixels = abs(elevation - level) / rise;
+          float bold = mod(level, 5.0) == 0.0 ? 1.0 : 0.0;
+          float line = (1.0 - smoothstep(0.5 + bold * 0.6, 1.3 + bold * 0.8, offPixels))
+            * step(0.5, abs(level)) * smoothstep(0.02, 0.05, slopeSeen);
+          diffuseColor.rgb = mix(diffuseColor.rgb, ${literal("#2e2114")}, line * (0.45 + bold * 0.25));
+        }
 
         /* Ice, in mm from its edge: below zero is frozen, and a pale band with a thin
            line marks where it reaches next. */
@@ -667,7 +844,7 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
         diffuseColor.rgb = mix(diffuseColor.rgb, frost, frozen);
 
         /* Height in sphere radii, used only to shade the bumps. */
-        float groundHeight = (1.0 - frozen) * (clods * 0.9 + grit * 0.12 + moss * (0.5 + tuft * 0.5)) / uRadiusMm;
+        float groundHeight = ((1.0 - frozen) * (clods * 0.9 + grit * 0.12 + moss * (0.5 + tuft * 0.5)) ) / uRadiusMm;
       `)
       .replace("#include <roughnessmap_fragment>", `
         #include <roughnessmap_fragment>
@@ -695,7 +872,7 @@ const MAX_PIECES = 3;
 const BOT_HUDDLE_MM = 50;     /* a bot side starts with all its pieces this close together */
 const MOVE_RANGE_MM = 50;      /* radius of the move circle */
 const ROLL_SECONDS = 0.5;       /* to curl up, and again to uncurl */
-const FIRE_RANGE_MM = 100;     /* radius of the cannon circle */
+const FIRE_RANGE_MM = 100;     /* cannon range between two spots at the same height */
 const CHARGE_SECONDS = 1;      /* from facing the target to the shot */
 const SHELL_SPEED_MM = 120;    /* per second, along the ground */
 const SHELL_ARC = 0.3;         /* peak height as a share of the distance */
@@ -709,13 +886,14 @@ const BLAST_DAMAGE = [
 const BLAST_RADIUS_MM = 20;
 const SPLAT_SIZE_MM = 26;      /* across the whole splatter, droplets included */
 const SQUISH_SECONDS = 0.22;
-const ROCK_AREA_MM2 = 20000;   /* one rock formation per this much surface */
-const ROCK_COUNT = [3, 24];    /* fewest and most on any sphere */
+const ROCK_AREA_MM2 = 17300;   /* one rock formation per this much surface (about 20% more cliffs than before) */
+const ROCK_COUNT = [3, 28];    /* fewest and most on any sphere */
 const STONE_REACH = 1.27;      /* the farthest a stone's outline can reach, as a multiple of radius */
 const STONE_SPACING = 0.72;    /* how tightly stones sit in a row, so no piece fits between */
 const ROCK_GAP_MM = 14;        /* always room for a piece to pass between two rocks */
 const MUSHROOM_CHANCE = 0.375;       /* of mushrooms sprouting, each turn */
-const MUSHROOM_PAIR_CHANCE = 0.5;    /* that two sprout at once instead of one */
+const MUSHROOM_TRIO_CHANCE = 0.25;   /* that three sprout at once */
+const MUSHROOM_PAIR_CHANCE = 0.5;    /* that two do; otherwise one */
 const MUSHROOM_CLEARANCE_MM = 50;    /* it always sprouts farther than this from every piece */
 const MUSHROOM_BUD_TURNS = 2;        /* turns before it blooms */
 const MUSHROOM_BLOOM_TURNS = 3;      /* turns in bloom before it wilts */
@@ -795,6 +973,9 @@ const PERKS = [
   { id: "igloo", type: "ball", cools: 2, name: "Igloo", text: "Switch on, then roll into a ball: if the ice catches it this turn, the ball rolls itself off the ice, unharmed. Then it needs 2 turns before it can do that again." },
   { id: "darkarts", type: "ball", cools: 2, name: "Dark Arts", text: "Switch on, then roll up on a fallen teammate's blood splatter to bring that piece back at 25 HP, with no perks. Then it needs 2 turns before it can do that again." },
   { id: "pain", type: "ball", name: "Pain packet", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell." },
+  { id: "pushpull", type: "fire", cools: 2, name: "+/-", text: "Tap to switch it on as Push, tap again for Pull. Every piece the shell hurts is shoved 10 mm straight away from where it lands, or pulled 10 mm toward it; a piece rolled into a ball takes no damage but still moves 5 mm. Then it needs 2 turns before it can be used again." },
+  { id: "doping", type: "move", cools: 2, name: "Doping", text: "Costs 10 HP. Give the piece a move, then aim its shot: it moves, then fires from where it ends up, with no cannon perks. Needs more than 10 HP. Then it needs 2 turns before it can be used again." },
+  { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
 const BIG_RADIUS_MM = BLAST_RADIUS_MM * 2;
 const BIG_OUTER_TRIM_MM = 5;         /* a big shell's outermost ring is this much narrower than double */
@@ -861,6 +1042,18 @@ const BOT_STYLES = {
 const BOT_ICE_CLEAR_MM = 30;          /* room it wants left when moving for any other reason */
 const BOT_THINK_MS = [300, 800];      /* always under a second */
 const CRAWL_SPEED_MM = 20;     /* per second */
+const BEETLE_TEAM = "beetle";
+const BEETLE_SIZE = 3;          /* times a piece's size */
+const BEETLE_HP = 150;
+const BEETLE_MOVE_MM = 45;
+const BEETLE_SPEED = 1.3;       /* times a piece's crawl */
+const BEETLE_DAMAGE = 25;       /* to each piece it runs into */
+const BEETLE_KNOCK_MM = 20;
+const BEETLE_REGEN = 5;         /* HP a turn */
+const BEETLE_HOME_MM = 50;      /* its territory, around a hill */
+const BEETLE_SIGHT_MM = 50;     /* it goes for any piece this close */
+const BEETLE_LEASH_MM = 100;    /* it gives up a chase this far outside its territory */
+const BEETLE_BOUNTY = 3;        /* perks for killing one */
 const TURN_SPEED = Math.PI;    /* radians per second when turning on the spot */
 const CRAWL_STEPS = 5;         /* leg cycles per second while crawling */
 const TURN_STEPS = 3.5;        /* leg cycles per second while turning */
@@ -885,13 +1078,103 @@ const TEAM_PAINT = {
   bot3: { shellDark: "#b8860b", shellLight: "#e0b43a", armor: "#6e5210", arrow: "#d4a017" },
   bot4: { shellDark: "#6a3fb0", shellLight: "#9468dc", armor: "#43266e", arrow: "#7d4fc9" },
   bot5: { shellDark: "#128a90", shellLight: "#33bcc2", armor: "#0d5458", arrow: "#18a0a8" },
+  beetle: { shellDark: "#3a2414", shellLight: "#5c3a1f", armor: "#2a190d", arrow: "#6b4423" },
 };
+
+/* A rhinoceros beetle: glossy domed wing cases, a broad shield behind the head, one
+   great curved horn and a small one, six legs. Built like a piece (1 unit long, feet on
+   the ground, a shadow as its second child) so the crawl animation works on it. */
+function buildBeetleModel() {
+  const paint = (hex, roughness, metalness = 0.15) => new THREE.MeshStandardMaterial({ color: linear(hex), roughness, metalness });
+  const shell = paint("#3a2414", 0.28, 0.25);
+  const shield = paint("#2c1a0e", 0.3, 0.25);
+  const horn = paint("#1e130a", 0.35, 0.2);
+  const limb = paint("#24160c", 0.5);
+  const ball = new THREE.SphereGeometry(1, 24, 16);
+  const model = new THREE.Group();
+  const blob = (material, position, scale, parent = model) => {
+    const mesh = new THREE.Mesh(ball, material);
+    mesh.position.set(...position);
+    mesh.scale.set(...scale);
+    parent.add(mesh);
+    return mesh;
+  };
+  const rod = (material, from, to, radius, parent = model, tip = radius) => {
+    const a = new THREE.Vector3(...from), b = new THREE.Vector3(...to);
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(tip, radius, a.distanceTo(b), 8), material);
+    mesh.position.copy(a).lerp(b, 0.5);
+    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize());
+    parent.add(mesh);
+    return mesh;
+  };
+  /* wing cases, with the seam down the middle */
+  blob(shell, [0, 0.2, -0.12], [0.24, 0.17, 0.36]);
+  blob(shield, [0, 0.215, -0.12], [0.012, 0.165, 0.34]);
+  /* the shield behind the head, and its little horn */
+  blob(shield, [0, 0.21, 0.2], [0.2, 0.14, 0.14]);
+  rod(horn, [0, 0.3, 0.22], [0, 0.4, 0.3], 0.035, model, 0.008);
+  /* head and the great horn, curving up and back */
+  blob(horn, [0, 0.15, 0.34], [0.09, 0.08, 0.09]);
+  const bend = [[0, 0.16, 0.38], [0, 0.22, 0.5], [0, 0.34, 0.56], [0, 0.46, 0.53], [0, 0.53, 0.46]];
+  const widths = [0.05, 0.04, 0.03, 0.02, 0.004];
+  for (let k = 0; k + 1 < bend.length; k++) rod(horn, bend[k], bend[k + 1], widths[k], model, widths[k + 1]);
+  /* feelers */
+  for (const side of [-1, 1]) rod(limb, [side * 0.05, 0.15, 0.4], [side * 0.12, 0.17, 0.47], 0.008);
+  /* six legs, each on a joint so they can walk */
+  for (let leg = 0; leg < 3; leg++) {
+    for (const side of [-1, 1]) {
+      const joint = new THREE.Group();
+      joint.position.set(side * 0.16, 0.12, 0.14 - leg * 0.17);
+      joint.userData = { side, leg };
+      model.add(joint);
+      const knee = [side * 0.17, 0.05, 0.03 - leg * 0.03];
+      rod(limb, [0, 0, 0], knee, 0.022, joint);
+      rod(limb, knee, [side * 0.28, -0.12, 0.05 - leg * 0.06], 0.016, joint, 0.008);
+    }
+  }
+  /* to 1 unit long, feet on the ground, as for a piece */
+  const box = new THREE.Box3();
+  const vertex = new THREE.Vector3();
+  model.updateMatrixWorld(true);
+  model.traverse((part) => {
+    if (!part.isMesh) return;
+    const points = part.geometry.attributes.position;
+    for (let i = 0; i < points.count; i++) box.expandByPoint(vertex.fromBufferAttribute(points, i).applyMatrix4(part.matrixWorld));
+  });
+  const length = box.max.z - box.min.z;
+  model.scale.setScalar(1 / length);
+  model.position.set(0, -box.min.y / length, -(box.min.z + box.max.z) / (2 * length));
+  const beetle = new THREE.Group();
+  beetle.add(model);
+  beetle.userData.muzzle = [0, 0.3, 0.5];
+  const paper = document.createElement("canvas");
+  paper.width = paper.height = 128;
+  const pen = paper.getContext("2d");
+  const fade = pen.createRadialGradient(64, 64, 8, 64, 64, 64);
+  fade.addColorStop(0, "rgba(0, 0, 0, 0.45)");
+  fade.addColorStop(1, "rgba(0, 0, 0, 0)");
+  pen.fillStyle = fade;
+  pen.fillRect(0, 0, 128, 128);
+  const shadow = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(paper), transparent: true, depthWrite: false }));
+  shadow.rotation.x = -Math.PI / 2;
+  shadow.scale.set(SHADOW_WIDTH * 1.2, SHADOW_LENGTH, 1);
+  beetle.add(shadow);
+  return beetle;
+}
 
 function buildPieceModel(colors) {
   const paint = (hex, roughness = 0.6, metalness = 0) =>
     new THREE.MeshStandardMaterial({ color: linear(hex), roughness, metalness });
-  const shellDark = paint(colors.shellDark, 0.5);
-  const shellLight = paint(colors.shellLight, 0.5);
+  /* glossy and nearly black like a real pill bug, with just a hint of the team colour */
+  const glossy = (hex, dark) => {
+    const material = new THREE.MeshStandardMaterial({ roughness: 0.18, metalness: 0.15 });
+    material.color.copy(linear(hex)).lerp(linear("#0c0c0e"), dark);
+    return material;
+  };
+  const shellDark = glossy(colors.shellDark, 0.62);
+  const shellLight = glossy(colors.shellLight, 0.55);
+  const seamPaint = paint("#d9c9a0", 0.45);
+  const headPaint = glossy("#1a1a1e", 0.3);
   const belly = paint("#34343a", 0.8);
   const armor = paint(colors.armor, 0.55, 0.15);
   const gun = paint("#2e3326", 0.45, 0.4);
@@ -947,21 +1230,31 @@ function buildPieceModel(colors) {
   /* Overlapping armored bands, the pill-bug back. They wrap around into the ball. */
   const under = blob(belly, [0, 0.075, 0], [0.235, 0.075, 0.5]);
   curlsTo(under, [0, BALL, 0], [0.24, 0.24, 0.24]);
-  const bands = 8;
+  const bands = 11;
+  let last = null;
   for (let i = 0; i < bands; i++) {
     const t = -1 + (2 * i) / (bands - 1);
     const round = Math.sqrt(1 - (t * 0.92) ** 2);
     const width = 0.04 + 0.27 * round;
-    const depth = 0.03 + 0.2 * round;
-    const band = blob(i % 2 ? shellLight : shellDark, [0, 0.1, t * 0.46], [width, depth, 0.112]);
+    const depth = 0.03 + 0.21 * round;
+    const z = t * 0.46;
+    const band = blob(i % 2 ? shellLight : shellDark, [0, 0.1, z], [width, depth, 0.086]);
     const angle = t * 2.6;
-    curlsTo(band, onBall(angle, depth), [width + 0.02, depth, 0.19], angle);
+    curlsTo(band, onBall(angle, depth), [width + 0.02, depth, 0.15], angle);
+    /* the pale seam where this band meets the one behind it, round the whole back */
+    if (last) {
+      const mid = (z + last.z) / 2;
+      const seam = blob(seamPaint, [0, 0.1, mid], [Math.max(width, last.width) + 0.005, Math.max(depth, last.depth) + 0.005, 0.011]);
+      const seamAngle = (angle + last.angle) / 2;
+      curlsTo(seam, onBall(seamAngle, Math.max(depth, last.depth) + 0.005), [Math.max(width, last.width) + 0.026, Math.max(depth, last.depth) + 0.005, 0.018], seamAngle);
+    }
+    last = { z, width, depth, angle };
   }
 
   /* Head, eyes and antennae tuck under the front of the ball */
-  const head = joint([0, 0.085, 0.5]);
+  const head = joint([0, 0.085, 0.5], { head: true });
   curlsTo(head, onBall(2.95, 0.08), [0.85, 0.85, 0.85], 2.95);
-  blob(shellDark, [0, 0, 0], [0.105, 0.075, 0.085], head);
+  blob(headPaint, [0, 0, 0], [0.105, 0.075, 0.085], head);
   for (const side of [-1, 1]) {
     blob(eye, [side * 0.075, 0.03, 0.045], [0.018, 0.018, 0.018], head);
     const antenna = joint([side * 0.05, 0.015, 0.06], { antenna: side }, head);
@@ -1039,6 +1332,65 @@ function buildPieceModel(colors) {
   return piece;
 }
 
+/* Hats, so the three pieces on a side are easy to tell apart. In the piece model's own
+   units; they sit on the head and go wherever it goes. */
+const HATS = ["Army helmet", "Navy cap", "Air Force cap"];
+const hatModels = (() => {
+  const paint = (hex, roughness = 0.6, metalness = 0) => new THREE.MeshStandardMaterial({ color: linear(hex), roughness, metalness });
+  const army = new THREE.Group();
+  const olive = paint("#4b5320", 0.7);
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(0.11, 20, 10, 0, Math.PI * 2, 0, Math.PI / 2), olive);
+  dome.scale.set(1, 0.85, 1.05);
+  const rim = new THREE.Mesh(new THREE.CylinderGeometry(0.128, 0.13, 0.012, 24), olive);
+  army.add(dome, rim);
+  const strap = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.006, 6, 24, Math.PI), paint("#3a3f1a", 0.8));
+  strap.rotation.z = Math.PI;
+  strap.position.y = 0.01;
+  army.add(strap);
+  army.position.set(0, 0.058, -0.005);
+
+  const navy = new THREE.Group();
+  const white = paint("#f4f4f0", 0.55);
+  const crown = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.078, 0.06, 20), white);
+  crown.position.y = 0.03;
+  const brim = new THREE.Mesh(new THREE.TorusGeometry(0.083, 0.02, 10, 24), white);
+  brim.rotation.x = Math.PI / 2;
+  brim.position.y = 0.012;
+  const band = new THREE.Mesh(new THREE.CylinderGeometry(0.0785, 0.0785, 0.012, 20), paint("#1b2f5e", 0.6));
+  band.position.y = 0.036;
+  navy.add(crown, brim, band);
+  navy.position.set(0, 0.06, -0.01);
+  navy.rotation.z = 0.15;
+
+  const air = new THREE.Group();
+  const blue = paint("#3d5a80", 0.6);
+  const sides = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.08, 0.045, 20), blue);
+  sides.position.y = 0.022;
+  const top = new THREE.Mesh(new THREE.CylinderGeometry(0.115, 0.095, 0.02, 24), blue);
+  top.position.y = 0.054;
+  const visor = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.008, 20, 1, false, -Math.PI / 2, Math.PI), paint("#111114", 0.25, 0.2));
+  visor.position.set(0, 0.006, 0.012);
+  visor.rotation.x = 0.15;
+  const badge = new THREE.Mesh(new THREE.SphereGeometry(0.018, 10, 8), paint("#d4a52a", 0.35, 0.6));
+  badge.scale.set(1.3, 0.9, 0.5);
+  badge.position.set(0, 0.033, 0.084);
+  air.add(sides, top, visor, badge);
+  air.position.set(0, 0.06, -0.005);
+  return [army, navy, air];
+})();
+function setHat(piece, index) {
+  if (piece.hatMesh) piece.hatMesh.parent.remove(piece.hatMesh);
+  piece.hatMesh = null;
+  piece.hatIndex = index;
+  if (index == null) return;
+  let head = null;
+  piece.mesh.traverse((part) => { if (part.userData.head) head = part; });
+  if (!head) return;
+  piece.hatMesh = hatModels[index % hatModels.length].clone();
+  piece.hatMesh.userData.index = index;
+  head.add(piece.hatMesh);
+}
+
 /* Sets every joint for a moment in the crawl. Legs ripple from tail to head with
    the two sides out of step, which is how real isopods walk. Zero strength is rest. */
 function poseCrawl(piece, strength) {
@@ -1098,7 +1450,7 @@ function pieceGap(a, b, radiusMm) {
   const reach = PIECE_LENGTH_MM / 2 - PIECE_HALF_WIDTH_MM;
   const ends = (pose) => {
     const center = pose.up.clone().multiplyScalar(radiusMm);
-    const length = pose.curl > 0.5 ? 0 : reach;
+    const length = pose.curl > 0.5 ? 0 : reach * (pose.size || 1);
     return [
       center.clone().addScaledVector(pose.forward, -length),
       center.clone().addScaledVector(pose.forward, length),
@@ -1106,7 +1458,7 @@ function pieceGap(a, b, radiusMm) {
   };
   const [p1, q1] = ends(a);
   const [p2, q2] = ends(b);
-  return segmentGap(p1, q1, p2, q2) - 2 * PIECE_HALF_WIDTH_MM;
+  return segmentGap(p1, q1, p2, q2) - PIECE_HALF_WIDTH_MM * ((a.size || 1) + (b.size || 1));
 }
 
 /* ---------- Marks drawn on the surface ---------- */
@@ -1119,9 +1471,8 @@ function tangentPair(up) {
 }
 
 /* A ring on the sphere between two angles from `up`. An inner angle of 0 fills it. */
-function capGeometry(up, innerAngle, outerAngle) {
+function capGeometry(up, innerAngle, outerAngle, rings = 28) {
   const [a, b] = tangentPair(up);
-  const rings = 28;
   const around = 128;
   const positions = [];
   const index = [];
@@ -1132,8 +1483,8 @@ function capGeometry(up, innerAngle, outerAngle) {
       const spin = (i / around) * Math.PI * 2;
       point.copy(up).multiplyScalar(Math.cos(angle))
         .addScaledVector(a, Math.sin(angle) * Math.cos(spin))
-        .addScaledVector(b, Math.sin(angle) * Math.sin(spin))
-        .multiplyScalar(MARK_LIFT);
+        .addScaledVector(b, Math.sin(angle) * Math.sin(spin));
+      onGround(point, MARK_LIFT);
       positions.push(point.x, point.y, point.z);
     }
   }
@@ -1156,11 +1507,10 @@ function arrowGeometry(from, to, startGap, halfWidth, headLength) {
   const distance = from.angleTo(to);
   const along = to.clone().addScaledVector(from, -to.dot(from)).normalize();
   const side = new THREE.Vector3().crossVectors(from, along).normalize();
-  const spot = (angle, offset) => from.clone().multiplyScalar(Math.cos(angle))
+  const spot = (angle, offset) => onGround(from.clone().multiplyScalar(Math.cos(angle))
     .addScaledVector(along, Math.sin(angle))
     .addScaledVector(side, offset)
-    .normalize()
-    .multiplyScalar(MARK_LIFT);
+    .normalize(), MARK_LIFT);
 
   const start = Math.min(startGap, distance * 0.35);
   const head = Math.min(headLength, distance * 0.45);
@@ -1201,13 +1551,13 @@ function seededRandom(seed) {
    give height as a multiple of radius, cliffs in mm. `size` shrinks shapes on small
    spheres, where a long wall would wrap around. */
 const ROCK_KINDS = [
-  { name: "boulder", share: 0.18, make: (r, size) => {
+  { name: "boulder", share: 0.156, make: (r, size) => {
     const length = (1 + r() * 14) * size;
     const curve = (r() - 0.5) * length;
     const width = 8 + r() * 9;
     return { path: (t) => [length * (t - 0.5), curve * (1 - (2 * t - 1) ** 2)], length, width, height: 0.75 };
   } },
-  { name: "mesa", share: 0.18, make: (r, size) => {
+  { name: "mesa", share: 0.187, make: (r, size) => {
     const length = (12 + r() * 45) * size;
     const curve = (r() - 0.5) * length * 0.8;
     return {
@@ -1215,7 +1565,7 @@ const ROCK_KINDS = [
       length, width: (13 + r() * 15) * Math.max(size, 0.6), height: 12 + r() * 14, taper: 0.5, cliff: true,
     };
   } },
-  { name: "wall", share: 0.16, make: (r, size) => {
+  { name: "wall", share: 0.166, make: (r, size) => {
     const length = (35 + r() * 105) * size;
     const bow = (r() - 0.5) * length * 0.4;
     return {
@@ -1223,7 +1573,7 @@ const ROCK_KINDS = [
       length, width: 4.5 + r() * 6, height: 10 + r() * 10, taper: 0.4, cliff: true, spurs: true,
     };
   } },
-  { name: "u", share: 0.16, make: (r, size) => {
+  { name: "u", share: 0.166, make: (r, size) => {
     const bend = (17 + r() * 10) * Math.max(size, 0.75);
     const armA = (14 + r() * 34) * size;
     const armB = (14 + r() * 34) * size;
@@ -1238,7 +1588,7 @@ const ROCK_KINDS = [
     };
     return { path, length, width: 4.5 + r() * 3.5, maxWidth: bend * 0.7, height: 10 + r() * 10, taper: 0.3, cliff: true };
   } },
-  { name: "crescent", share: 0.11, make: (r, size) => {
+  { name: "crescent", share: 0.114, make: (r, size) => {
     const radius = (22 + r() * 34) * size;
     const sweep = 1.6 + r() * 2.4;
     const path = (t) => {
@@ -1250,7 +1600,7 @@ const ROCK_KINDS = [
       height: 11 + r() * 12, taper: 0.6, cliff: true, spurs: true,
     };
   } },
-  { name: "bend", share: 0.09, make: (r, size) => {
+  { name: "bend", share: 0.094, make: (r, size) => {
     const legA = (22 + r() * 40) * size;
     const legB = (22 + r() * 40) * size;
     const turn = 0.9 + r() * 1.4;
@@ -1268,7 +1618,7 @@ const ROCK_KINDS = [
     };
     return { path, length, width: 5 + r() * 5, maxWidth: corner * 0.75, height: 10 + r() * 10, taper: 0.4, cliff: true, spurs: true };
   } },
-  { name: "snake", share: 0.07, make: (r, size) => {
+  { name: "snake", share: 0.073, make: (r, size) => {
     const length = (50 + r() * 70) * size;
     const swing = (9 + r() * 14) * size;
     const waves = 1 + r() * 0.6;
@@ -1279,7 +1629,7 @@ const ROCK_KINDS = [
       height: 9 + r() * 10, taper: 0.4, cliff: true,
     };
   } },
-  { name: "spire", share: 0.05, make: (r) => {
+  { name: "spire", share: 0.043, make: (r) => {
     return { path: () => [0, 0], length: 0, width: 4 + r() * 3.5, height: 2.6 + r() * 1.6, sharp: true };
   } },
 ];
@@ -1822,8 +2172,8 @@ function surfacePatch(up, angle, heading) {
       point.copy(up)
         .addScaledVector(across, (u * 2 - 1) * half)
         .addScaledVector(along, (v * 2 - 1) * half)
-        .normalize()
-        .multiplyScalar(SPLAT_LIFT);
+        .normalize();
+      onGround(point, SPLAT_LIFT);
       positions.push(point.x, point.y, point.z);
       normals.push(point.x, point.y, point.z);
       uvs.push(u, v);
@@ -1864,7 +2214,12 @@ function startBoard() {
   const iceStepU = { value: ICE_STEPS_DEFAULT[0] };   /* how far the next spread goes, for the pale band */
   let iceSteps = [...ICE_STEPS_DEFAULT];
   const groundPaint = groundMaterial(groundRadius, iceReach, iceStepU);
-  const groundMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 192, 128), groundPaint);
+  const groundMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 288, 180), groundPaint);
+  const groundBase = groundMesh.geometry.attributes.position.array.slice();   /* the unit sphere */
+  /* Drawn a touch behind whatever lies on it, so marks on a slope never dip under. */
+  groundPaint.polygonOffset = true;
+  groundPaint.polygonOffsetFactor = 1.5;
+  groundPaint.polygonOffsetUnits = 2;
   globe.add(groundMesh);
   const cliffTopMesh = new THREE.Mesh(new THREE.BufferGeometry(), groundMaterial(groundRadius, iceReach, iceStepU, CLIFF_TOP_PAINT));
   globe.add(cliffTopMesh);
@@ -2206,6 +2561,7 @@ function startBoard() {
   })();
 
   const SIM_STEP = 1 / 120;
+  let bendClock = 0;
   let simClock = 0;
 
   function frame(now) {
@@ -2228,6 +2584,15 @@ function startBoard() {
       simClock -= SIM_STEP;
     }
     if (glide) stepGlide(seconds);
+    bendClock += seconds;
+    if (bendClock > 0.1) {
+      for (const bend of terrain.bends) {
+        if (!bend.dirty) continue;
+        bend.dirty = false;
+        refreshGround(bend);
+      }
+      bendClock = 0;
+    }
     if (mushrooms.length) stepMushrooms(seconds * playSpeed);
     if (pointers.size === 0 && Math.hypot(view.spinX, view.spinY) > 0.0003) {
       spin(view.spinX, view.spinY);
@@ -2245,7 +2610,7 @@ function startBoard() {
   /* Pieces. Each one's spot is a direction from the center of the sphere, so it
      keeps its latitude and longitude when the diameter changes. */
   const pieceModels = {};
-  for (const team of Object.keys(TEAM_PAINT)) pieceModels[team] = buildPieceModel(TEAM_PAINT[team]);
+  for (const team of Object.keys(TEAM_PAINT)) pieceModels[team] = team === BEETLE_TEAM ? buildBeetleModel() : buildPieceModel(TEAM_PAINT[team]);
   /* A little sword, held out at the head's right side, for a piece making a melee
      move. Built in the piece's own units: 1 is nose to tail, forward is +Z. */
   const swordModel = (() => {
@@ -2301,7 +2666,8 @@ function startBoard() {
   let net = null;               /* online: the connection and the turn's progress */
   const online = () => !!(net && net.inGame);
   const yours = () => pieces.filter((p) => p.team === localTeam && !p.decoy);
-  const bots = () => pieces.filter((p) => !humanTeams.has(p.team) && !p.decoy);
+  const bots = () => pieces.filter((p) => !humanTeams.has(p.team) && !p.decoy && p.team !== BEETLE_TEAM);
+  const beetles = () => pieces.filter((p) => p.team === BEETLE_TEAM);
   /* Every side is on its own: bots fight you and each other. */
   let botCount = 3;
   const botTeams = () => (seatList ? seatList.filter((seat) => !seat.human).map((seat) => seat.team)
@@ -2309,6 +2675,7 @@ function startBoard() {
   /* The sides listed under yours in the panel. */
   const rowTeams = () => (seatList ? seatList.map((seat) => seat.team).filter((team) => team !== localTeam) : botTeams());
   const teamName = (team) => {
+    if (team === BEETLE_TEAM) return "the beetles";
     if (team === localTeam) return "You";
     const seat = seatList && seatList.find((s2) => s2.team === team && s2.human);
     return seat ? seat.name : team === "you" ? "You" : "Bot " + team.slice(3);
@@ -2372,12 +2739,15 @@ function startBoard() {
   const painReady = (piece) => hasPerk(piece, "pain") && piece.painTurn === turnState.number;
   const perkOn = (piece, id) => piece.perksOn.has(id) || (id === "tunnel" && piece.perks.includes("tunnel"));
   /* The flame is aimed first, when it's on; every other fire click is the cannon. */
-  const aimingFlame = (piece) => !!piece && perkOn(piece, "flame") && action === "fire" && orderLeg === "first";
+  const aimingFlame = (piece) => !!piece && perkOn(piece, "flame") && action === "fire" && orderLeg === "first" && !(perkOn(piece, "doping") && piece.plan);
   const fireReach = (piece) => (aimingFlame(piece) ? FLAME_RANGE_MM : FIRE_RANGE_MM);
   const slowed = (piece) => turnState.number >= piece.slowFrom && turnState.number <= piece.slowTurn;
   const moveReach = (piece) => (slowed(piece) ? WEB_MOVE_MM : MOVE_RANGE_MM);
-  const crawlSpeed = (piece) => (piece.ride ? RAIL_SPEED_MM : CRAWL_SPEED_MM * (perkOn(piece, "double") ? 2 : 1) * (slowed(piece) ? 0.5 : 1));
-  const shellMods = (piece) => ({ web: perkOn(piece, "web"), pierce: perkOn(piece, "pierce"), big: perkOn(piece, "big"), puddle: perkOn(piece, "puddle") });
+  const crawlSpeed = (piece) => (piece.ride ? RAIL_SPEED_MM : CRAWL_SPEED_MM * (perkOn(piece, "double") ? 2 : 1) * (slowed(piece) ? 0.5 : 1) * (piece.team === BEETLE_TEAM ? BEETLE_SPEED : 1));
+  const shellMods = (piece) => (piece.plainShot ? { web: false, pierce: false, big: false, puddle: false, pushpull: null } : {
+    web: perkOn(piece, "web"), pierce: perkOn(piece, "pierce"), big: perkOn(piece, "big"), puddle: perkOn(piece, "puddle"),
+    pushpull: perkOn(piece, "pushpull") ? (piece.pushMode === "pull" ? "pull" : "push") : null,
+  });
 
   const ballShape = new THREE.Sphere(new THREE.Vector3(), 1);
   const raycaster = new THREE.Raycaster();
@@ -2461,7 +2831,9 @@ function startBoard() {
   const deselectButton = document.getElementById("deselect");
   const diameterInput = document.getElementById("diameter");
   const diameterValue = document.getElementById("diameterValue");
-  const setupGroups = ["diameterGroup", "botGroup", "timerGroup", "iceGroup"].map((id) => document.getElementById(id));
+  const setupGroups = ["diameterGroup", "botGroup", "timerGroup", "beetleGroup", "iceGroup"].map((id) => document.getElementById(id));
+  const beetleInput = document.getElementById("beetleCount");
+  const beetleValue = document.getElementById("beetleCountValue");
   const devMode = document.getElementById("devMode");
   const devPerksButton = document.getElementById("devPerks");
   const devPicker = document.getElementById("devPicker");
@@ -2533,7 +2905,7 @@ function startBoard() {
     const order = medals + packed + webbed + (action === "fire"
       ? (aimingFlame(selected) ? "Click inside the red circle to aim the flame. Then you can pick a cannon shot too."
         : orderLeg === "afterFlame" ? "Flame aimed. Click inside the red circle for a cannon shot too, or deselect to skip it."
-        : "Click inside the red circle to choose where the shell lands.")
+        : `Click inside the red area to choose where the shell lands. This piece stands ${heightText(elevation(orderFrom()))}: higher ground reaches farther.`)
       : "Click inside the circle to set where this piece goes. Click the piece itself to cancel its order.");
     const resting = [];
     if (selected && !canFire(selected)) resting.push("cannon");
@@ -2551,6 +2923,30 @@ function startBoard() {
     transparent: true, opacity: 0.95, depthWrite: false, side: THREE.DoubleSide,
   }));
   circleFill.visible = circleEdge.visible = false;
+  const plainFill = circleFill.material;
+  const plainEdge = circleEdge.material;
+  const rangeUniforms = { uEdge: { value: 1 } };
+  /* Every spot whose distance is within 100 mm plus the shooter's height minus its own. */
+  function rangePaint(edge) {
+    const paint = new THREE.MeshBasicMaterial({ transparent: true, opacity: edge ? 0.95 : 0.2, depthWrite: false, side: THREE.DoubleSide });
+    paint.extensions = { derivatives: true };
+    paint.customProgramCacheKey = () => (edge ? "range-edge" : "range-fill");
+    paint.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, rangeUniforms);
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nattribute float aOver;\nvarying float vOver;")
+        .replace("#include <begin_vertex>", "#include <begin_vertex>\nvOver = aOver;");
+      shader.fragmentShader = shader.fragmentShader
+        .replace("#include <common>", "#include <common>\nvarying float vOver;\nuniform float uEdge;")
+        .replace("#include <clipping_planes_fragment>", `
+          float over = vOver;
+          ${edge ? "if (abs(over) > uEdge * 0.5) discard;" : "if (over > 0.0) discard;"}
+          #include <clipping_planes_fragment>`);
+    };
+    return paint;
+  }
+  const rangeFill = rangePaint(false);
+  const rangeEdge = rangePaint(true);
   globe.add(circleFill, circleEdge);
   const arrowPaint = {};
   for (const team of Object.keys(TEAM_PAINT)) {
@@ -2558,7 +2954,9 @@ function startBoard() {
   }
 
   /* Where the order being set starts. A second move starts where the first one ends. */
-  const orderFrom = () => (orderLeg === "second" ? selected.plan : selected.up);
+  const doping = (piece) => !!piece && perkOn(piece, "doping") && !!piece.plan;
+  const orderFrom = () => (orderLeg === "second" ? selected.plan
+    : action === "fire" && doping(selected) ? selected.plan2 || selected.plan : selected.up);
 
   function drawCircle() {
     circleFill.visible = circleEdge.visible = !!selected && action !== "ball";
@@ -2567,12 +2965,38 @@ function startBoard() {
     const faking = orderLeg === "decoy";
     circleFill.material.color.copy(firing ? linear("#e02828") : faking ? linear("#7fd8ff") : linear("#12b5b0"));
     circleEdge.material.color.copy(firing ? linear("#c91f1f") : faking ? linear("#4fbdf0") : linear("#0a9a96"));
-    const range = (firing ? fireReach(selected) : moveReach(selected)) / radiusMm();
-    const edge = markWidthMm() / radiusMm();
     circleFill.geometry.dispose();
     circleEdge.geometry.dispose();
-    circleFill.geometry = capGeometry(orderFrom(), 0, range);
-    circleEdge.geometry = capGeometry(orderFrom(), range - edge, range);
+    if (firing && !aimingFlame(selected)) {
+      /* The cannon: shaped by the hills, so drawn wide and trimmed in the shader. */
+      circleFill.material = rangeFill;
+      circleEdge.material = rangeEdge;
+      rangeUniforms.uEdge.value = markWidthMm();
+      const widest = (FIRE_RANGE_MM + TERRAIN_HIGH_MM + TERRAIN_LOW_MM + 2) / radiusMm();
+      const area = capGeometry(orderFrom(), 0, widest, 72);
+      /* for each point: its distance, less the cannon's reach to it (below 0 is in range) */
+      const from = orderFrom().clone().normalize();
+      const base = FIRE_RANGE_MM + elevation(from);
+      const places = area.attributes.position;
+      const over = new Float32Array(places.count);
+      const q = new THREE.Vector3();
+      for (let i = 0; i < places.count; i++) {
+        q.fromBufferAttribute(places, i).normalize();
+        over[i] = mmBetween(from, q) - (base - elevation(q));
+      }
+      area.setAttribute("aOver", new THREE.BufferAttribute(over, 1));
+      circleFill.geometry = area;
+      circleEdge.geometry = area.clone();
+    } else {
+      circleFill.material = plainFill;
+      circleEdge.material = plainEdge;
+      const range = (firing ? fireReach(selected) : moveReach(selected)) / radiusMm();
+      const edge = markWidthMm() / radiusMm();
+      circleFill.geometry = capGeometry(orderFrom(), 0, range);
+      circleEdge.geometry = capGeometry(orderFrom(), range - edge, range);
+    }
+    circleFill.material.color.copy(firing ? linear("#e02828") : faking ? linear("#7fd8ff") : linear("#12b5b0"));
+    circleEdge.material.color.copy(firing ? linear("#c91f1f") : faking ? linear("#4fbdf0") : linear("#0a9a96"));
     needsDraw = true;
   }
 
@@ -2633,11 +3057,11 @@ function startBoard() {
       const width = markWidthMm();
       piece.arrow = new THREE.Mesh(
         arrowGeometry(piece.up, target, 6 / r, width / 2 / r, (width * 3.2) / r),
-        piece.fire || piece.flameAt ? blastPaint : arrowPaint[piece.team]
+        !piece.plan && (piece.fire || piece.flameAt) ? blastPaint : arrowPaint[piece.team]
       );
       globe.add(piece.arrow);
       if (piece.fire) {
-        piece.aimMark = blastMark(piece.fire, shellMods(piece));
+        piece.aimMark = blastMark(piece.fire, piece.plan ? {} : shellMods(piece));
         globe.add(piece.aimMark);
       }
       const extra = (from, to, paint) => {
@@ -2647,6 +3071,7 @@ function startBoard() {
         piece.extraArrows.push(arrow);
       };
       if (piece.plan && piece.plan2) extra(piece.plan, piece.plan2, arrowPaint[piece.team]);
+      if (piece.plan && piece.fire) extra(piece.plan2 || piece.plan, piece.fire, blastPaint);   /* Doping: the shot after the move */
       /* An X where the move will run into rock and stop short. A digger goes through. */
       if (piece.plan && piece.team === localTeam && !moving && !perkOn(piece, "tunnel")) {
         const stop = rockStopOnPath(piece.up, piece.plan) || (piece.plan2 ? rockStopOnPath(piece.plan, piece.plan2) : null);
@@ -2659,7 +3084,7 @@ function startBoard() {
       if (piece.decoyPlan) extra(piece.up, piece.decoyPlan, hologramPaint);
       if (piece.railPath && piece.railPath.length > 1) {
         const line = new THREE.Line(
-          new THREE.BufferGeometry().setFromPoints(piece.railPath.map((v) => v.clone().multiplyScalar(1 + 1.2 / r))),
+          new THREE.BufferGeometry().setFromPoints(piece.railPath.map((v) => onGround(v.clone().normalize(), 1 + 1.2 / r))),
           new THREE.LineBasicMaterial({ color: arrowPaint[piece.team].color })
         );
         globe.add(line);
@@ -2793,6 +3218,7 @@ function startBoard() {
       button.disabled = !ready || !!perk.passive;
       const name = document.createElement("span");
       name.textContent = perk.id === "pain" && painReady(selected) ? `${perk.name}: two shots this turn`
+        : perk.id === "pushpull" && perkOn(selected, perk.id) ? `${perk.name}: ${selected.pushMode === "pull" ? "Pull" : "Push"}`
         : perk.passive || ready ? perk.name : `${perk.name}: cooling down`;
       const about = document.createElement("small");
       about.textContent = perk.text;
@@ -2804,10 +3230,17 @@ function startBoard() {
 
   /* Perks change what an order can be, so a change starts the piece's order over. */
   function togglePerk(piece, id) {
-    if (perkOn(piece, id)) {
+    if (id === "pushpull" && perkOn(piece, id) && piece.pushMode !== "pull") {
+      piece.pushMode = "pull";
+    } else if (perkOn(piece, id)) {
       piece.perksOn.delete(id);
     } else {
+      if (id === "doping" && piece.hp <= 10) {
+        say("Doping costs 10 HP, and this piece doesn't have more than that.");
+        return;
+      }
       piece.perksOn.add(id);
+      if (id === "pushpull") piece.pushMode = "push";
     }
     if (PERKS.find((perk) => perk.id === id).type === "ball") {
       drawPerks();
@@ -2859,13 +3292,13 @@ function startBoard() {
   /* Faces the piece along `forward` and stands it on `up`. */
   function poseOnSphere(piece) {
     const right = new THREE.Vector3().crossVectors(piece.up, piece.forward);
-    piece.mesh.position.copy(piece.up);
+    piece.mesh.position.copy(piece.up).multiplyScalar(1 + groundLift(piece.up));
     piece.mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, piece.up, piece.forward));
   }
 
   /* Where a piece is, or will be once its move is done. */
   const finalSpot = (piece) => piece.plan || piece.up;
-  const spotTaken = (spot) => pieces.some((p) => mmBetween(finalSpot(p), spot) < PIECE_LENGTH_MM);
+  const spotTaken = (spot) => pieces.some((p) => mmBetween(finalSpot(p), spot) < PIECE_LENGTH_MM * (1 + (p.size || 1)) / 2);
 
   function surfaceAt(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
@@ -2875,8 +3308,10 @@ function startBoard() {
     );
     camera.updateMatrixWorld();
     raycaster.setFromCamera(pointer, camera);
-    const hit = raycaster.ray.intersectSphere(ballShape, new THREE.Vector3());
-    return hit ? hit.normalize().applyQuaternion(globe.quaternion.clone().invert()) : null;
+    globe.updateMatrixWorld();
+    const onHill = raycaster.intersectObject(groundMesh, false)[0];
+    const hit = onHill ? onHill.point.clone() : raycaster.ray.intersectSphere(ballShape, new THREE.Vector3());
+    return hit ? hit.applyQuaternion(globe.quaternion.clone().invert()).normalize() : null;
   }
 
   /* Picks by distance on screen, because a piece can be a few pixels long when zoomed out. */
@@ -2888,7 +3323,7 @@ function startBoard() {
     let best = null;
     let bestGap = reach;
     for (const piece of pieces) {
-      const world = piece.up.clone().applyQuaternion(globe.quaternion);
+      const world = piece.up.clone().multiplyScalar(1 + groundLift(piece.up)).applyQuaternion(globe.quaternion);
       if (world.dot(camera.position.clone().sub(world)) <= 0) continue;   /* far side */
       const screen = world.clone().project(camera);
       const gap = Math.hypot(
@@ -2909,7 +3344,7 @@ function startBoard() {
     title.textContent = piece.record && piece.record.name ? piece.record.name : "Your piece";
     const hp = document.createElement("span");
     hp.className = "tip-hp";
-    hp.textContent = `${piece.hp} HP`;
+    hp.textContent = `${piece.hp} HP \u00b7 ground ${heightText(elevation(piece.up))}`;
     pieceTip.append(title, hp);
     const owned = PERKS.filter((perk) => hasPerk(piece, perk.id));
     if (!owned.length) {
@@ -2995,34 +3430,466 @@ function startBoard() {
       rocks.push(rock);
     }
 
-    const positions = [];
-    const colors = [];
-    const tops = { positions: [], normals: [] };
-    for (const rock of rocks) addRockShape(rock, r, positions, colors, tops);
+    layOutTerrain();
+    shapeRocks();
+    layOutPlants();
+    needsDraw = true;
+  }
+
+  /* The rocks' shapes, sitting on the ground as it is now. Each rock's shape is kept, so
+     when only one patch of ground moves (Earth bending), only the rocks for which `near`
+     says yes are set down on it again. */
+  function shapeRocks(near = null) {
+    const r = radiusMm();
+    const settle = (list) => {
+      const q = new THREE.Vector3();
+      for (let i = 0; i < list.length; i += 3) {
+        q.set(list[i], list[i + 1], list[i + 2]);
+        const radius = q.length();
+        q.divideScalar(radius);
+        const out = radius + groundLift(q) - (radius < 1 + 0.01 / r ? 2.5 / r : 0);
+        list[i] = q.x * out; list[i + 1] = q.y * out; list[i + 2] = q.z * out;
+      }
+    };
+    const shapes = [];
+    for (const rock of rocks) {
+      let kept = rock.shapeKept;
+      if (!kept || kept.r !== r || !near) {
+        const raw = { positions: [], colors: [], tops: { positions: [], normals: [] } };
+        addRockShape(rock, r, raw.positions, raw.colors, raw.tops);
+        kept = rock.shapeKept = { r, raw, set: null };
+      }
+      if (!kept.set || !near || near(rock)) {
+        kept.set = { positions: kept.raw.positions.slice(), tops: kept.raw.tops.positions.slice() };
+        settle(kept.set.positions);
+        settle(kept.set.tops);
+      }
+      shapes.push(kept);
+    }
+    const join = (pick) => {
+      const out = new Float32Array(shapes.reduce((n, kept) => n + pick(kept).length, 0));
+      let at = 0;
+      for (const kept of shapes) { out.set(pick(kept), at); at += pick(kept).length; }
+      return out;
+    };
+    const positions = join((kept) => kept.set.positions);
+    const colors = join((kept) => kept.raw.colors);
+    const tops = { positions: join((kept) => kept.set.tops), normals: join((kept) => kept.raw.tops.normals) };
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
     geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-    rockMesh.geometry.dispose();
-    rockMesh.geometry = geometry;
     const topShape = new THREE.BufferGeometry();
     topShape.setAttribute("position", new THREE.Float32BufferAttribute(tops.positions, 3));
     topShape.setAttribute("normal", new THREE.Float32BufferAttribute(tops.normals, 3));
-    cliffTopMesh.geometry.dispose();
-    cliffTopMesh.geometry = topShape;
+    /* setting a rock down again only moves it up or down, so how far the ice is from each
+       point stays the same */
+    for (const [mesh, fresh] of [[rockMesh, geometry], [cliffTopMesh, topShape]]) {
+      const old = mesh.geometry.attributes.aIceDist;
+      if (ice.rock && near && old && old.count === fresh.attributes.position.count) fresh.setAttribute("aIceDist", old);
+      else if (ice.rock) measureIce(fresh);
+      mesh.geometry.dispose();
+      mesh.geometry = fresh;
+    }
     needsDraw = true;
   }
+
+  /* ---------- Grass and small plants ----------
+     Just for looks: tufts of grass and little leafy plants scattered over the ground,
+     thick on level ground and in the valleys, thin on the stony hills, never on rock.
+     Two instanced meshes, so thousands cost little. Seeded like the rocks. Where the ice
+     reaches, they frost over. Sizes in mm. */
+  const plantShapes = (() => {
+    const blades = [];
+    for (let k = 0; k < 7; k++) {
+      const turn = (k / 7) * Math.PI * 2 + (k % 2) * 0.4;
+      const out = 0.35 + (k % 3) * 0.25;
+      const bx = Math.cos(turn) * out, bz = Math.sin(turn) * out;
+      const side = [-Math.sin(turn) * 0.22, Math.cos(turn) * 0.22];
+      const tall = 1.9 + ((k * 37) % 10) * 0.16;
+      const lean = 0.5 + (k % 2) * 0.35;
+      blades.push(bx - side[0], 0, bz - side[1], bx + side[0], 0, bz + side[1], bx + Math.cos(turn) * lean, tall, bz + Math.sin(turn) * lean);
+    }
+    const grass = new THREE.BufferGeometry();
+    grass.setAttribute("position", new THREE.Float32BufferAttribute(blades, 3));
+    grass.computeVertexNormals();
+    const leaves = [];
+    for (let k = 0; k < 5; k++) {
+      const turn = (k / 5) * Math.PI * 2;
+      const c = Math.cos(turn), sn = Math.sin(turn);
+      const at = (along, across, up) => [c * along - sn * across, up, sn * along + c * across];
+      const tip = at(2.1, 0, 0.9), left = at(1.0, 0.55, 0.75), right = at(1.0, -0.55, 0.75), base = at(0.1, 0, 0.25);
+      leaves.push(...base, ...left, ...tip, ...base, ...tip, ...right);
+    }
+    leaves.push(-0.12, 0, 0, 0.12, 0, 0, 0, 1.2, 0);   /* a little stem in the middle */
+    const plant = new THREE.BufferGeometry();
+    plant.setAttribute("position", new THREE.Float32BufferAttribute(leaves, 3));
+    plant.computeVertexNormals();
+    return { grass, plant };
+  })();
+  const plantPaint = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+  const plants = { grass: null, plant: null, spots: [] };
+  const PLANT_GREENS = ["#5f8a2e", "#6f9a37", "#4f7a28", "#7fa443", "#58803a"];
+  const PLANT_FROST = new THREE.Color(linear("#dcefff"));
+  function layOutPlants() {
+    for (const kind of ["grass", "plant"]) {
+      if (plants[kind]) { globe.remove(plants[kind]); plants[kind].dispose(); plants[kind] = null; }
+    }
+    const rand = seededRandom((rockSeed * 7919 + 4111) >>> 0);
+    const r = radiusMm();
+    const area = 4 * Math.PI * r * r;
+    const want = { grass: Math.min(9000, Math.round(area / 110)), plant: Math.min(2500, Math.round(area / 520)) };
+    const matrix = new THREE.Matrix4();
+    const turn = new THREE.Quaternion();
+    const yUp = new THREE.Vector3(0, 1, 0);
+    const paint = new THREE.Color();
+    plants.spots = [];
+    for (const kind of ["grass", "plant"]) {
+      const mesh = new THREE.InstancedMesh(plantShapes[kind], plantPaint, want[kind]);
+      mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      let made = 0;
+      for (let tries = 0; tries < want[kind] * 4 && made < want[kind]; tries++) {
+        const y = rand() * 2 - 1;
+        const a = rand() * Math.PI * 2;
+        const ring = Math.sqrt(1 - y * y);
+        const up = new THREE.Vector3(ring * Math.cos(a), y, ring * Math.sin(a));
+        const height = elevation(up);
+        /* thinner the higher the ground: bare stone up top */
+        const keep = height > 0 ? Math.max(0.12, 1 - height / 7) : 1;
+        if (rand() > keep) continue;
+        if (rockGap({ up, forward: tangentPair(up)[0], curl: 1 }) < 1.5) continue;
+        const size = (kind === "grass" ? 0.7 + rand() * 0.7 : 0.6 + rand() * 0.6) / r;
+        turn.setFromUnitVectors(yUp, up).multiply(new THREE.Quaternion().setFromAxisAngle(yUp, rand() * Math.PI * 2));
+        matrix.compose(up.clone().multiplyScalar(1 + height / r), turn, new THREE.Vector3(size, size, size));
+        mesh.setMatrixAt(made, matrix);
+        const green = PLANT_GREENS[Math.floor(rand() * PLANT_GREENS.length)];
+        paint.set(linear(green));
+        if (height < 0) paint.multiplyScalar(0.8 + 0.2 * (1 + height / 10));   /* darker down in the valleys */
+        mesh.setColorAt(made, paint);
+        plants.spots.push({ mesh, index: made, up, green: paint.clone(), frosted: false, turn: turn.clone(), size });
+        made++;
+      }
+      mesh.count = made;
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+      mesh.instanceMatrix.needsUpdate = true;
+      plants[kind] = mesh;
+      globe.add(mesh);
+    }
+    plants.frostReach = -Infinity;
+    frostPlants();
+  }
+  /* Plants the ice has reached turn white with frost. */
+  function frostPlants() {
+    if (!ice.rock || ice.reach < plants.frostReach + 0.5) return;
+    plants.frostReach = ice.reach;
+    const touched = new Set();
+    for (const spot of plants.spots) {
+      if (spot.frosted || iceDistance(spot.up) > ice.reach) continue;
+      spot.frosted = true;
+      spot.mesh.setColorAt(spot.index, PLANT_FROST);
+      touched.add(spot.mesh);
+    }
+    for (const mesh of touched) mesh.instanceColor.needsUpdate = true;
+  }
+  function thawPlants() {
+    const touched = new Set();
+    for (const spot of plants.spots) {
+      if (!spot.frosted) continue;
+      spot.frosted = false;
+      spot.mesh.setColorAt(spot.index, spot.green);
+      touched.add(spot.mesh);
+    }
+    for (const mesh of touched) mesh.instanceColor.needsUpdate = true;
+    plants.frostReach = -Infinity;
+  }
+
+  /* Hills first, until about a quarter of the globe is raised, then valleys until about
+     15% is lowered. A hill is a cluster of 1-4 lumps and spurs; a valley winds as a
+     chain of 1-4 stretches, sometimes ending in a bowl. Spots spread evenly over the
+     globe measure the shares. Seeded like the rocks, so everyone online gets the same. */
+  const terrain = [];
+  terrain.waves = [];
+  terrain.bends = [];
+  function layOutTerrain() {
+    const rand = seededRandom((rockSeed * 2654435761 + 977) >>> 0);
+    const r = radiusMm();
+    const grow = Math.max(1, r / 150);
+    const tops = Math.pow(grow, 1.5);
+    const reachGrow = Math.pow(grow, 1.2);
+    const randomUp = () => {
+      const y = rand() * 2 - 1;
+      const a = rand() * Math.PI * 2;
+      const ring = Math.sqrt(1 - y * y);
+      return new THREE.Vector3(ring * Math.cos(a), y, ring * Math.sin(a));
+    };
+    const tangentAt = (up) => {
+      const [u, v] = tangentPair(up);
+      const turn = rand() * Math.PI * 2;
+      return u.multiplyScalar(Math.cos(turn)).addScaledVector(v, Math.sin(turn));
+    };
+    const step = (from, toward, mm) => {
+      const axis = new THREE.Vector3().crossVectors(from, toward).normalize();
+      return from.clone().applyAxisAngle(axis, mm / r).normalize();
+    };
+    /* the waves: long and low, so together they tilt a slope by less than 0.28 */
+    const waves = [];
+    let waveMm = 0;
+    for (let k = 0; k < TERRAIN_WAVES; k++) {
+      const wavelength = (k < 2 ? 100 + rand() * 100 : 18 + rand() * 25) * grow;
+      const amp = (TERRAIN_WAVE_SLOPE * wavelength) / (2 * Math.PI);
+      waves.push({ k: randomUp(), phase: rand() * Math.PI * 2, freq: (2 * Math.PI * r) / wavelength, amp });
+      waveMm += amp;
+    }
+    const tilt = TERRAIN_WAVE_SLOPE * TERRAIN_WAVES;
+    const slopeLow = TERRAIN_GENTLE / (1 - tilt);
+    const slopeHigh = TERRAIN_STEEP / (1 + tilt);
+    const grade = (lean) => slopeLow + Math.min(1, Math.max(0, lean + (rand() - 0.5) * 0.3)) * (slopeHigh - slopeLow);
+    const piece = (a, b, height, top) => {
+      /* rounded shoulders and a long foot, or a steep crest over a gentle apron */
+      const rounded = rand() < 0.6;
+      const grades = rounded ? [grade(0.1), grade(0.9), grade(0.25)] : [grade(0.9), grade(0.45), grade(0.05)];
+      const tall = Math.abs(height);
+      const first = tall * (0.2 + rand() * 0.25);
+      const second = (tall - first) * (0.35 + rand() * 0.4);   /* always leaves a foot */
+      const w1 = first / grades[0];
+      const w2 = second / grades[1];
+      const w3 = (tall - first - second) / grades[2];
+      return prepareTerrainPiece({ a, b, top, height, w1, w2, d1: first, d2: first + second, width: w1 + w2 + w3 }, r, waveMm);
+    };
+    /* the way onward from `next`, having come from `at`, turned by up to `bend` either way */
+    const onward = (at, next, bend) => {
+      const heading = next.clone().sub(at);
+      heading.addScaledVector(next, -heading.dot(next)).normalize();
+      return heading.applyAxisAngle(next, (rand() - 0.5) * 2 * bend);
+    };
+    const hill = () => {
+      const height = 3 + rand() * (TERRAIN_HIGH_MM - 3);
+      const parts = [];
+      const spine = [randomUp()];
+      let heading = tangentAt(spine[0]);
+      const bends = rand() < 0.3 ? 0 : 1 + Math.floor(rand() * 3);
+      for (let k = 0; k < bends; k++) {
+        const next = step(spine[k], heading, (8 + rand() * 26) * reachGrow);
+        heading = onward(spine[k], next, 1.0);
+        spine.push(next);
+      }
+      /* the spine, rising and falling a little along its length */
+      if (spine.length === 1) parts.push(piece(spine[0], spine[0].clone(), height, (1 + rand() * 5) * tops));
+      for (let k = 0; k + 1 < spine.length; k++) {
+        parts.push(piece(spine[k], spine[k + 1], height * (k === 0 ? 1 : 0.65 + rand() * 0.35), (0.5 + rand() * 3.5) * tops));
+      }
+      /* knolls and spurs off the spine, lower than it */
+      const extras = Math.floor(rand() * 4);
+      for (let k = 0; k < extras; k++) {
+        const from = spine[Math.floor(rand() * spine.length)];
+        const at = step(from, tangentAt(from), (4 + rand() * 18) * tops);
+        const end = rand() < 0.5 ? step(at, tangentAt(at), (6 + rand() * 18) * reachGrow) : at.clone();
+        parts.push(piece(at, end, height * (0.35 + rand() * 0.5), (0.5 + rand() * 4) * tops));
+      }
+      return parts;
+    };
+    const valley = () => {
+      let at = randomUp();
+      let heading = tangentAt(at);
+      const depth = -(3 + rand() * (TERRAIN_LOW_MM - 3));
+      const parts = [];
+      const stretches = 2 + Math.floor(rand() * 4);
+      const course = [at];
+      for (let k = 0; k < stretches; k++) {
+        const next = step(at, heading, (10 + rand() * 28) * reachGrow);
+        parts.push(piece(at, next, depth * (0.7 + rand() * 0.3), (0.5 + rand() * 3.5) * tops));
+        heading = onward(at, next, 0.8);   /* carry on from the end, turning a little */
+        at = next;
+        course.push(at);
+      }
+      if (rand() < 0.45) {   /* a shallower side branch */
+        const from = course[1 + Math.floor(rand() * (course.length - 1))];
+        const next = step(from, tangentAt(from), (10 + rand() * 22) * reachGrow);
+        parts.push(piece(from.clone(), next, depth * (0.4 + rand() * 0.35), (0.5 + rand() * 2.5) * tops));
+      }
+      if (rand() < 0.5) parts.push(piece(at.clone(), at.clone(), depth, (3 + rand() * 8) * tops));   /* a bowl at the end */
+      return parts;
+    };
+
+    const count = 6000;
+    const spots = [];
+    for (let i = 0; i < count; i++) {
+      const y = 1 - (2 * (i + 0.5)) / count;
+      const ring = Math.sqrt(1 - y * y);
+      const turn = i * Math.PI * (3 - Math.sqrt(5));
+      spots.push(new THREE.Vector3(Math.cos(turn) * ring, y, Math.sin(turn) * ring));
+    }
+    const spotWave = spots.map((q) => terrainWave(waves, q.x, q.y, q.z));
+    const high = new Float32Array(count);
+    const low = new Float32Array(count);
+    terrain.length = 0;
+    terrain.bends = [];
+    for (const [sign, target, list, other, most, make] of [[1, TERRAIN_HIGH_SHARE, high, low, Math.round(TERRAIN_MAX * 0.6), hill], [-1, TERRAIN_LOW_SHARE, low, high, TERRAIN_MAX, valley]]) {
+      let covered = 0;
+      for (let tries = 0; tries < (sign > 0 ? 600 : 4000) && covered / count < target && terrain.length < most; tries++) {
+        const parts = make();
+        if (terrain.length + parts.length > most) continue;
+        if (parts.some((f) => f.a.angleTo(f.b) / 2 + (f.top + f.width) / r > Math.PI * 0.3)) continue;   /* too big for this globe */
+        /* never touching ground of the other kind, with a little level ground between */
+        const touched = new Map();
+        let clash = false;
+        for (const f of parts) {
+          const margin = Math.cos(Math.min(Math.PI, Math.acos(Math.min(1, f.cosReach)) + 5 / r));
+          for (let i = 0; i < count && !clash; i++) {
+            const q = spots[i];
+            if (f.c.x * q.x + f.c.y * q.y + f.c.z * q.z < margin) continue;
+            if (other[i] !== 0) { clash = true; break; }
+            const h = terrainPieceHeight(f, q.x, q.y, q.z, spotWave[i], r);
+            if (h !== 0) touched.set(i, sign > 0 ? Math.max(touched.get(i) || 0, h) : Math.min(touched.get(i) || 0, h));
+          }
+          if (clash) break;
+        }
+        if (clash) continue;
+        let gained = 0;
+        for (const [i, h] of touched) if (Math.abs(list[i]) <= 0.05 && Math.abs(h) > 0.05) gained++;
+        if ((covered + gained) / count > target + 0.03) continue;   /* overshoots: try a smaller one */
+        for (const [i, h] of touched) list[i] = sign > 0 ? Math.max(list[i], h) : Math.min(list[i], h);
+        covered += gained;
+        terrain.push(...parts);
+      }
+    }
+    terrain.waves = waves;
+    terrain.cells = indexTerrain(terrain);
+    terrain.shares = { high: high.reduce((n, h) => n + (h > 0.05 ? 1 : 0), 0) / count, low: low.reduce((n, h) => n + (h < -0.05 ? 1 : 0), 0) / count };
+
+    groundLift = (v) => terrainHeightAt(terrain, waves, v.x, v.y, v.z, r) / r;
+    raiseGround();
+  }
+
+  /* The ground mesh follows the hills, with its normals worked out from the slope. */
+  let plainHeights = null;
+  /* `area` ({ at, cos }) limits the work to the ground around one spot. */
+  function raiseGround(area = null) {
+    const geometry = groundMesh.geometry;
+    const places = geometry.attributes.position;
+    const normals = geometry.attributes.normal;
+    const { widthSegments: across, heightSegments: down } = geometry.parameters;
+    const r = radiusMm();
+    const out = places.array;
+    const old = geometry.attributes.aElev;
+    const heights = area && old ? old.array : new Float32Array(places.count);
+    const outside = (i, slack = 0) => area && groundBase[i * 3] * area.at.x + groundBase[i * 3 + 1] * area.at.y + groundBase[i * 3 + 2] * area.at.z < area.cos - slack;
+    /* the height before any Earth bending, kept so a rising hill only adds its cone */
+    if (!area || !plainHeights || plainHeights.length !== places.count) {
+      plainHeights = new Float32Array(places.count);
+      const bends = terrain.bends;
+      terrain.bends = [];
+      for (let i = 0; i < places.count; i++) plainHeights[i] = terrainHeightAt(terrain, terrain.waves, groundBase[i * 3], groundBase[i * 3 + 1], groundBase[i * 3 + 2], r);
+      terrain.bends = bends;
+    }
+    for (let i = 0; i < places.count; i++) {
+      if (outside(i)) continue;
+      const x = groundBase[i * 3], y = groundBase[i * 3 + 1], z = groundBase[i * 3 + 2];
+      const length = Math.sqrt(x * x + y * y + z * z) || 1;
+      heights[i] = bentHeight(terrain.bends, x / length, y / length, z / length, r, plainHeights[i]);
+      const scale = (1 + heights[i] / r) / (Math.sqrt(x * x + y * y + z * z) || 1);
+      out[i * 3] = x * scale; out[i * 3 + 1] = y * scale; out[i * 3 + 2] = z * scale;
+    }
+    if (area && old) old.needsUpdate = true;
+    else geometry.setAttribute("aElev", new THREE.BufferAttribute(heights, 1));
+    /* normals across the grid: around and down, from the neighbours on each side */
+    const at = (ix, iy) => ((iy * (across + 1)) + ((ix + across) % across)) * 3;
+    const u = new THREE.Vector3(), v = new THREE.Vector3(), n = new THREE.Vector3(), p = new THREE.Vector3();
+    for (let iy = 0; iy <= down; iy++) {
+      for (let ix = 0; ix <= across; ix++) {
+        const i = (iy * (across + 1) + ix) * 3;
+        if (outside(i / 3, 0.01)) continue;
+        p.set(groundBase[i], groundBase[i + 1], groundBase[i + 2]).normalize();
+        if (iy === 0 || iy === down) { normals.setXYZ(i / 3, p.x, p.y, p.z); continue; }
+        const e = at(ix + 1, iy), w = at(ix - 1, iy), nn = at(ix, iy - 1), ss = at(ix, iy + 1);
+        u.set(out[e] - out[w], out[e + 1] - out[w + 1], out[e + 2] - out[w + 2]);
+        v.set(out[ss] - out[nn], out[ss + 1] - out[nn + 1], out[ss + 2] - out[nn + 2]);
+        n.crossVectors(u, v).normalize();
+        if (n.dot(p) < 0) n.negate();
+        normals.setXYZ(i / 3, n.x, n.y, n.z);
+      }
+    }
+    places.needsUpdate = true;
+    normals.needsUpdate = true;
+    /* a rising hill never goes past the highest the ground can be */
+    if (area && geometry.boundingSphere) geometry.boundingSphere.radius = Math.max(geometry.boundingSphere.radius, 1 + TERRAIN_HIGH_MM / r);
+    else geometry.computeBoundingSphere();
+  }
+
+  /* Earth bending: the ground under the piece rises 10 mm, to at most 15 mm, with a
+     small level top and a 1-in-5 slope down to the ground around it. */
+  function bendEarth(piece) {
+    const before = elevation(piece.up);
+    const apex = Math.min(TERRAIN_HIGH_MM, before + EARTH_BEND_MM);
+    if (apex <= before + 0.01) return false;
+    terrain.bends.push({ at: piece.up.clone().normalize(), apex, grow: 0 });
+    floatLabel(piece, "Earth bending", "hit heal");
+    return true;
+  }
+  /* After the ground changes shape: the mesh, the rocks, the plants and everything that
+     sits on the ground go back on top of it. */
+  function refreshGround(bend = null) {
+    const r = radiusMm();
+    /* around a rising hill, only what it can reach; otherwise everything */
+    const area = bend ? { at: bend.at, cos: Math.cos(Math.min(Math.PI, (BEND_TOP_MM + bend.apex / BEND_GRADE + 3) / r)) } : null;
+    const near = (v) => !area || v.clone().normalize().dot(area.at) >= area.cos;
+    raiseGround(area);
+    const rockNear = (rock) => rock.up.angleTo(area.at) * r < rock.reach + BEND_TOP_MM + bend.apex / BEND_GRADE + 5;
+    if (!area) shapeRocks();
+    else if (rocks.some(rockNear)) shapeRocks(rockNear);
+    const matrix = new THREE.Matrix4();
+    for (const spot of plants.spots) {
+      if (!near(spot.up)) continue;
+      matrix.compose(spot.up.clone().multiplyScalar(1 + elevation(spot.up) / r), spot.turn, new THREE.Vector3(spot.size, spot.size, spot.size));
+      spot.mesh.setMatrixAt(spot.index, matrix);
+    }
+    for (const kind of ["grass", "plant"]) if (plants[kind]) plants[kind].instanceMatrix.needsUpdate = true;
+    for (const piece of pieces) poseOnSphere(piece);
+    for (const splat of splats) {
+      if (!near(splat.spot)) continue;
+      splat.mesh.geometry.dispose();
+      splat.mesh.geometry = surfacePatch(splat.spot, SPLAT_SIZE_MM / r, splat.heading);
+    }
+    for (const web of webs) {
+      if (!near(web.spot)) continue;
+      web.mesh.geometry.dispose();
+      web.mesh.geometry = surfacePatch(web.spot, (web.radius * 2) / r, web.heading || 0);
+    }
+    for (const puddle of puddles) if (near(puddle.spot)) redrawPuddle(puddle);
+    for (const line of wires) if (line.mesh && line.points.some(near)) redrawWire(line);
+    for (const line of rails) if (line.mesh && line.points.some(near)) redrawRail(line);
+    const reseat = (thing) => {
+      if (!near(thing.position)) return;
+      const dir = thing.position.clone().normalize();
+      thing.position.copy(dir).multiplyScalar(1 + groundLift(dir));
+    };
+    for (const mushroom of mushrooms) if (mushroom.mesh) reseat(mushroom.mesh);
+    for (const mouth of tunnels) reseat(mouth);
+    for (const mesh of frozen) reseat(mesh);
+    if (ice.lastLand && near(ice.lastLand.spot)) { ice.lastLand.key = null; showLastLand(); }
+    for (const piece of pieces) drawArrow(piece);
+    if (selected) drawCircle();
+    needsDraw = true;
+  }
+
+  /* Height of the ground in mm above (or below) the base line. */
+  const elevation = (up) => terrainHeightAt(terrain, terrain.waves, up.x, up.y, up.z, radiusMm());
+  /* A cannon reaches 100 mm between spots at the same height, 1 mm farther for every
+     mm the target is below the shooter, and 1 mm less for every mm above. */
+  const cannonReach = (from, to) => FIRE_RANGE_MM + elevation(from) - elevation(to);
+  const heightText = (mm) => (Math.abs(mm) < 0.5 ? "level" : `${mm > 0 ? "+" : "\u2212"}${Math.abs(mm).toFixed(0)} mm`);
 
   /* The room between a piece and the nearest rock in mm. Below zero means touching. */
   function rockGap(pose) {
     const r = radiusMm();
-    const length = pose.curl > 0.5 ? 0 : PIECE_LENGTH_MM / 2 - PIECE_HALF_WIDTH_MM;
+    const size = pose.size || 1;
+    const length = pose.curl > 0.5 ? 0 : (PIECE_LENGTH_MM / 2 - PIECE_HALF_WIDTH_MM) * size;
     let least = Infinity;
     for (const rock of rocks) {
       if (pose.up.angleTo(rock.up) * r > rock.reach + PIECE_LENGTH_MM + Math.min(least, 60)) continue;
       for (const along of length ? [-1, -0.5, 0, 0.5, 1] : [0]) {
         const point = pose.up.clone().addScaledVector(pose.forward, (along * length) / r).normalize();
         const [x, y] = sphereToRock(rock, point, r);
-        least = Math.min(least, rockDistance(rock, x, y) - PIECE_HALF_WIDTH_MM);
+        least = Math.min(least, rockDistance(rock, x, y) - PIECE_HALF_WIDTH_MM * size);
       }
     }
     return least;
@@ -3179,6 +4046,7 @@ function startBoard() {
       if (part.userData.antenna) piece.antennae.push({ joint: part, side: part.userData.antenna });
       if (part.userData.curl) piece.curlParts.push({ part, ...part.userData.curl });
     });
+    if (team !== BEETLE_TEAM) setHat(piece, pieces.filter((p) => p.team === team && !p.decoy).length % hatModels.length);
     piece.tag = document.createElement("div");
     piece.tag.className = "hp";
     piece.tag.innerHTML = `<i style="background: var(--team-${team})"></i><b></b>`;
@@ -3196,13 +4064,14 @@ function startBoard() {
   let newRecordLater = false;   /* decoys and the risen take an existing record */
 
   function showHealth(piece) {
-    piece.tag.firstChild.style.width = (piece.hp / PIECE_HP) * 100 + "%";
+    piece.tag.firstChild.style.width = (piece.hp / (piece.maxHp || PIECE_HP)) * 100 + "%";
     piece.tag.lastChild.textContent = piece.hp;
   }
 
   /* Where a point on the globe lands in the stage, and whether it faces the viewer. */
   function onStage(point) {
-    const world = point.clone().applyQuaternion(globe.quaternion);
+    const world = point.clone().normalize();
+    world.multiplyScalar(1 + groundLift(world)).applyQuaternion(globe.quaternion);
     const front = world.dot(camera.position.clone().sub(world)) > 0;
     const seen = world.project(camera);
     return { x: ((seen.x + 1) / 2) * width, y: ((1 - seen.y) / 2) * height, front };
@@ -3238,7 +4107,7 @@ function startBoard() {
   function placePiece(spot) {
     if (yours().length >= MAX_PIECES) return;
     if (spotTaken(spot)) {
-      say("That spot is taken. Pick a spot at least 10 mm from another piece.");
+      say("That spot is taken. Pick a spot farther from the other pieces.");
       return;
     }
     /* New pieces face the top of the screen. */
@@ -3259,7 +4128,7 @@ function startBoard() {
     if (yours().length === MAX_PIECES) {
       placementOver = true;
       startTimer();
-      placeBotPieces();
+      if (!pieces.some((p) => !humanTeams.has(p.team))) placeBotPieces();
       sproutMushroom();
       startBotThinking();
     }
@@ -3339,6 +4208,106 @@ function startBoard() {
       }
       for (const spot of spots) addPiece(team, spot, facingAt(spot));
     }
+    spawnBeetles();
+  }
+
+  /* Offline, the bots' pieces and the beetles are on the board before you place yours,
+     and are set out afresh whenever a setting changes until your last piece is down. */
+  function setOutBots() {
+    if (online() || placementOver) return;
+    for (const piece of pieces.filter((p) => !humanTeams.has(p.team))) {
+      if (piece.record) roster.splice(roster.indexOf(piece.record), 1);
+      piece.record = null;
+      removePiece(piece);
+    }
+    placeBotPieces();
+    drawBoards();
+    say(idleMessage());
+    needsDraw = true;
+  }
+
+  /* Each beetle makes its home on a hill: one of the hills' high points, clear of rock
+     and well away from every piece. Without a free hill, any open ground will do. */
+  let beetleCount = 2;
+  function spawnBeetles() {
+    const r = radiusMm();
+    const hills = terrain.filter((f) => f.height > 4).map((f) => f.a).sort(() => Math.random() - 0.5);
+    const spare = () => randomDirection();
+    for (let n = 0; n < beetleCount; n++) {
+      let home = null;
+      for (let tries = 0; tries < 200 && !home; tries++) {
+        const spot = tries < hills.length ? hills[tries].clone() : spare();
+        const forward = tangentPair(spot)[0];
+        const pose = { up: spot, forward, curl: 0, size: BEETLE_SIZE };
+        if (rockGap(pose) < 2) continue;
+        if (pieces.some((p) => mmBetween(p.up, spot) < (p.team === BEETLE_TEAM ? BEETLE_HOME_MM * 1.5 : 40))) continue;
+        home = spot;
+      }
+      if (!home) continue;
+      newRecordLater = true;
+      const turn = Math.random() * Math.PI * 2;
+      const [a, b] = tangentPair(home);
+      const beetle = addPiece(BEETLE_TEAM, home.clone(), a.multiplyScalar(Math.cos(turn)).addScaledVector(b, Math.sin(turn)).normalize());
+      newRecordLater = false;
+      Object.assign(beetle, { size: BEETLE_SIZE, hp: BEETLE_HP, maxHp: BEETLE_HP, home: home.clone(), grudgeId: null });
+      sizePiece(beetle.mesh, pieceScale() * BEETLE_SIZE);
+      showHealth(beetle);
+      poseOnSphere(beetle);
+    }
+  }
+
+  /* What a beetle has in mind as a turn starts: strayed too far, it drops the chase and
+     heads home, ignoring everything until it's back; a chase ends when its quarry is
+     gone. Worked out the same way in every player's browser. */
+  function beetleMind(beetle) {
+    const fromHome = mmBetween(beetle.up, beetle.home);
+    let { grudgeId = null, returning = false } = beetle;
+    if (fromHome > BEETLE_HOME_MM + BEETLE_LEASH_MM) {
+      grudgeId = null;
+      returning = true;
+    }
+    if (returning && fromHome <= BEETLE_HOME_MM) returning = false;
+    if (grudgeId != null && !pieces.some((p) => p.id === grudgeId && !p.decoy)) grudgeId = null;
+    return { grudgeId, returning };
+  }
+
+  /* Beetle orders: chase whoever shot it, unless that leads more than 100 mm from home;
+     else charge any piece within 50 mm; else wander its territory, heading home if it
+     has strayed. Each charge carries on past the target, up to 45 mm. */
+  function chooseBeetleMoves() {
+    const r = radiusMm();
+    const toward = (from, to, mm) => {
+      const axis = new THREE.Vector3().crossVectors(from, to);
+      if (axis.lengthSq() < 1e-12) return from.clone();
+      return from.clone().applyAxisAngle(axis.normalize(), mm / r).normalize();
+    };
+    for (const beetle of beetles()) {
+      beetle.plan = beetle.plan2 = beetle.fire = beetle.fire2 = beetle.decoyPlan = null;
+      beetle.roll = false;
+      beetle.perksOn.clear();
+      const fromHome = mmBetween(beetle.up, beetle.home);
+      const mind = beetleMind(beetle);
+      const grudge = mind.grudgeId != null ? pieces.find((p) => p.id === mind.grudgeId) : null;
+      let target = mind.returning ? null : grudge;
+      if (!target && !mind.returning) {
+        target = pieces.filter((p) => p.team !== BEETLE_TEAM && mmBetween(p.up, beetle.up) <= BEETLE_SIGHT_MM)
+          .sort((p, q) => mmBetween(p.up, beetle.up) - mmBetween(q.up, beetle.up))[0] || null;
+      }
+      if (target) {
+        const gap = mmBetween(beetle.up, target.up);
+        beetle.plan = toward(beetle.up, target.up, Math.min(BEETLE_MOVE_MM, gap + 12));
+      } else if (mind.returning || fromHome > BEETLE_HOME_MM) {
+        beetle.plan = toward(beetle.up, beetle.home, Math.min(BEETLE_MOVE_MM, fromHome));
+      } else {
+        /* wander: a spot in the territory, picked at random */
+        const [a, b] = tangentPair(beetle.home);
+        const turn = Math.random() * Math.PI * 2;
+        const way = a.multiplyScalar(Math.cos(turn)).addScaledVector(b, Math.sin(turn));
+        const spot = toward(beetle.home, beetle.home.clone().add(way.multiplyScalar(0.01)).normalize(), Math.random() * BEETLE_HOME_MM * 0.8);
+        const far = mmBetween(beetle.up, spot);
+        beetle.plan = far > 4 ? toward(beetle.up, spot, Math.min(BEETLE_MOVE_MM, far)) : null;
+      }
+    }
   }
 
   /* Bot orders. A piece with an enemy in range usually fires near it. Otherwise it
@@ -3348,7 +4317,7 @@ function startBoard() {
   /* A bot curling up switches on every ball perk it has that can help. Self Destruct
      stays its own choice. */
   function armBall(piece) {
-    for (const id of ["recuperate", "rolling", "igloo", "darkarts", "pain"]) {
+    for (const id of ["recuperate", "rolling", "igloo", "darkarts", "pain", "earthbend"]) {
       if (hasPerk(piece, id) && perkReady(piece, id)) piece.perksOn.add(id);
     }
   }
@@ -3360,6 +4329,7 @@ function startBoard() {
       const axis = new THREE.Vector3().crossVectors(piece.up, aim).normalize();
       return piece.up.clone().applyAxisAngle(axis, reachMm / radiusMm());
     };
+    chooseBeetleMoves();
     for (const piece of bots()) {
       piece.plan = piece.plan2 = piece.decoyPlan = piece.fire = null;
       piece.roll = false;
@@ -3452,14 +4422,14 @@ function startBoard() {
       }
 
       /* Under threat it may curl up, more readily when hurt. */
-      if (canRoll(piece) && gap <= FIRE_RANGE_MM && Math.random() < (piece.hp <= 25 ? style.rollHurt : style.roll)) {
+      if (canRoll(piece) && gap <= cannonReach(nearest.up, piece.up) && Math.random() < (piece.hp <= 25 ? style.rollHurt : style.roll)) {
         piece.roll = true;
         armBall(piece);
         continue;
       }
       if (gap <= BLAST_RADIUS_MM + 4) {
         piece.plan = spotToward(piece, heading.clone().negate(), 1, reach * 0.8);
-      } else if (canFire(piece) && gap <= FIRE_RANGE_MM - 8 && Math.random() < style.fire) {
+      } else if (canFire(piece) && gap <= cannonReach(piece.up, nearest.up) - 8 && Math.random() < style.fire) {
         /* A little scatter around where that piece is now. */
         const aimNear = (target) => {
           const side = heading.clone().applyAxisAngle(piece.up, Math.random() * Math.PI * 2);
@@ -3467,18 +4437,24 @@ function startBoard() {
           return target.up.clone().applyAxisAngle(axis, (Math.random() * 8) / radiusMm());
         };
         const wideSafe = (spot) => !spot || !pieces.some((p) => p.team === piece.team && !p.decoy && mmBetween(p.up, spot) <= BIG_RADIUS_MM);
-        const landing = aimNear(nearest);
-        if (safeTo(landing)) {
+        const inReach = (spot) => mmBetween(piece.up, spot) <= cannonReach(piece.up, spot);
+        let landing = aimNear(nearest);
+        if (!inReach(landing)) landing = nearest.up.clone();
+        if (safeTo(landing) && inReach(landing)) {
           piece.fire = landing;
           if (painReady(piece)) {
-            const other = enemies.find((e) => e !== nearest && mmBetween(piece.up, e.up) <= FIRE_RANGE_MM - 8) || nearest;
+            const other = enemies.find((e) => e !== nearest && mmBetween(piece.up, e.up) <= cannonReach(piece.up, e.up) - 8) || nearest;
             const second = aimNear(other);
-            if (safeTo(second)) piece.fire2 = second;
+            if (safeTo(second) && inReach(second)) piece.fire2 = second;
           }
           if (hasPerk(piece, "web") && Math.random() < 0.35) piece.perksOn.add("web");
           if (hasPerk(piece, "pierce") && (nearest.hp <= 25 || Math.random() < 0.2)) piece.perksOn.add("pierce");
           if (hasPerk(piece, "big") && Math.random() < 0.3 && [landing, piece.fire2].every(wideSafe)) piece.perksOn.add("big");
           if (hasPerk(piece, "puddle") && Math.random() < (ice.rock ? 0.5 : 0.2)) piece.perksOn.add("puddle");
+          if (hasPerk(piece, "pushpull") && perkReady(piece, "pushpull") && Math.random() < 0.4) {
+            piece.perksOn.add("pushpull");
+            piece.pushMode = Math.random() < 0.5 ? "push" : "pull";
+          }
           /* Up close, it breathes fire as well, if no teammate is in the way. */
           if (hasPerk(piece, "flame") && gap <= FLAME_RANGE_MM - 5) {
             const frame = flameFrame(piece.up, nearest.up);
@@ -3496,7 +4472,7 @@ function startBoard() {
         /* Toward that piece if it can, or any open direction if rocks are in the way. A
            survivor backs away from enemies too close, and sidesteps at shooting range. */
         const backing = gap < style.keepAway;
-        const sidestep = style.keepAway && !backing && gap <= FIRE_RANGE_MM;
+        const sidestep = style.keepAway && !backing && gap <= cannonReach(nearest.up, piece.up);
         const way = backing ? heading.clone().negate()
           : sidestep ? heading.clone().applyAxisAngle(piece.up, (Math.random() < 0.5 ? 1 : -1) * Math.PI / 2)
           : heading;
@@ -3513,6 +4489,17 @@ function startBoard() {
       if (piece.plan && iceMargin(piece.plan) <= 10) piece.plan = escapeIce(piece, reach) || piece.plan;
       if (piece.plan) botMovePerks(piece, nearest, gap, heading, spotToward);
       if (piece.plan) botRide(piece, nearest);
+      /* Doping: out of reach now, but in reach from where the move ends */
+      if (piece.plan && !piece.fire && nearest && hasPerk(piece, "doping") && perkReady(piece, "doping") && piece.hp > 25 && canFire(piece)) {
+        const from = piece.plan2 || piece.plan;
+        const target = nearest.up.clone();
+        const far = mmBetween(from, target);
+        const friendly = pieces.some((p) => p.team === piece.team && p !== piece && !p.decoy && mmBetween(p.up, target) <= BLAST_RADIUS_MM + 2);
+        if (far <= cannonReach(from, target) - 6 && far > BLAST_RADIUS_MM + 4 && !friendly) {
+          piece.perksOn.add("doping");
+          piece.fire = target;
+        }
+      }
     }
   }
 
@@ -3654,8 +4641,12 @@ function startBoard() {
         piece.fire2 = spot;
         drawArrow(piece);
       } else {
-        if (orderLeg !== "afterFlame") clearOrders(piece);
-        if (orderLeg === "first" && perkOn(piece, "flame")) {
+        if (orderLeg !== "afterFlame") {
+          if (doping(piece)) {
+            piece.fire = piece.fire2 = piece.flameAt = null;   /* keep the move: it fires after it */
+          } else clearOrders(piece);
+        }
+        if (orderLeg === "first" && perkOn(piece, "flame") && !doping(piece)) {
           piece.flameAt = spot;
           drawArrow(piece);
           orderLeg = "afterFlame";
@@ -3724,6 +4715,13 @@ function startBoard() {
         : "Move set. Click inside the blue circle to send the decoy, or deselect to skip it.");
       return;
     }
+    if (perkOn(piece, "doping") && piece.plan && canFire(piece)) {
+      action = "fire";
+      orderLeg = "first";
+      drawCircle();
+      say(`Move set: ${Math.round(distance)} mm away.${tunnelNote} Doping: now click inside the red area to aim the shot it fires from there, or deselect to skip it.`);
+      return;
+    }
     select(null);
     say(`Move set: ${Math.round(distance)} mm away.${tunnelNote} Order another piece, or end your turn.`);
   }
@@ -3775,15 +4773,20 @@ function startBoard() {
         say(idleMessage());
         return;
       }
-      const reach = orderLeg === "rail" ? Infinity : { move: moveReach(selected), fire: fireReach(selected), ball: -1 }[action];
-      if (distance <= reach) {
+      const inRange = orderLeg === "rail" ? true
+        : action === "move" ? distance <= moveReach(selected)
+        : action === "fire" ? distance <= (aimingFlame(selected) ? FLAME_RANGE_MM : cannonReach(orderFrom(), spot))
+        : false;
+      if (inRange) {
         giveOrder(selected, spot, distance);
         return;
       }
     }
     const piece = pieceAt(clientX, clientY);
     if (piece && devMode.checked && !online()) devPiece = piece.decoy ? null : piece;
-    if (piece && piece.team !== localTeam) {
+    if (piece && piece.team === BEETLE_TEAM) {
+      say(`That's a rhinoceros beetle, with ${piece.hp} of ${piece.maxHp} HP. It guards the hill around it and charges any piece that comes close, or that shoots it. Killing one earns ${BEETLE_BOUNTY} perks.`);
+    } else if (piece && piece.team !== localTeam) {
       const owned = PERKS.filter((perk) => hasPerk(piece, perk.id)).map((perk) => perk.name);
       const medalCount = `${piece.medals} ${piece.medals === 1 ? "medal" : "medals"} of valor`;
       say(`That's one of ${teamName(piece.team)}'s pieces, with ${medalCount}.${owned.length ? ` Perks: ${owned.join(", ")}.` : ""} Click one of your own.`);
@@ -3870,7 +4873,7 @@ function startBoard() {
   document.getElementById("devNone").addEventListener("click", () => devList.querySelectorAll("input").forEach((box) => { box.checked = false; }));
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !devPicker.hidden) devPicker.hidden = true; });
 
-  const sidesStanding = () => [...new Set(pieces.filter((p) => !p.decoy).map((p) => p.team))];
+  const sidesStanding = () => [...new Set(pieces.filter((p) => !p.decoy && p.team !== BEETLE_TEAM).map((p) => p.team))];   /* beetles aren't a side */
   const sidesLeft = () => sidesStanding().length;
 
   function finishTurn() {
@@ -3904,6 +4907,12 @@ function startBoard() {
       if (online()) net.sendState();
       showResults();
       return;
+    }
+    for (const beetle of beetles()) {
+      if (beetle.hp >= beetle.maxHp) continue;
+      beetle.hp = Math.min(beetle.maxHp, beetle.hp + BEETLE_REGEN);
+      showHealth(beetle);
+      floatLabel(beetle, "+" + BEETLE_REGEN, "hit heal");
     }
     for (const piece of pieces) {
       if (piece.decoy || !hasPerk(piece, "healing") || piece.hp >= PIECE_HP) continue;
@@ -3961,7 +4970,21 @@ function startBoard() {
     }
     for (const piece of pieces.filter((p) => p.decoyPlan)) sendDecoy(piece);
     const movers = pieces.filter((p) => p.plan);
-    const gunners = pieces.filter((p) => p.fire || p.flameAt);
+    for (const beetle of beetles()) {
+      beetle.rammed = new Set();
+      Object.assign(beetle, beetleMind(beetle));
+    }
+    const doped = pieces.filter((p) => !p.decoy && p.plan && p.fire && perkOn(p, "doping") && perkReady(p, "doping") && p.hp > 10);
+    for (const piece of doped) {
+      piece.hp -= 10;
+      showDamage(piece, 10);
+      showHealth(piece);
+      floatLabel(piece, "Doping", "hit");
+      piece.perkTurn.doping = turnState.number;
+      piece.firedTurn = turnState.number;
+      piece.dopeFire = true;
+    }
+    const gunners = pieces.filter((p) => (p.fire || p.flameAt) && !p.dopeFire);
     for (const piece of movers) {
       piece.move = { facing: false };
       piece.moveStart = { up: piece.up.clone(), forward: piece.forward.clone(), curl: piece.curl };
@@ -3972,6 +4995,11 @@ function startBoard() {
       piece.firedTurn = turnState.number;
     }
     /* Rolling up lasts one turn. Unless ordered to roll again, a piece uncurls now. */
+    let bent = false;
+    for (const piece of pieces) {
+      if (piece.roll && !piece.decoy && perkOn(piece, "earthbend") && bendEarth(piece)) bent = true;
+    }
+    if (bent) needsDraw = true;   /* the ground rises as the turn plays */
     for (const piece of pieces) {
       piece.curlGoal = piece.roll ? 1 : 0;
       if (piece.roll) {
@@ -4117,7 +5145,7 @@ function startBoard() {
     const a = Math.sin((1 - t) * shell.arc);
     const b = Math.sin(t * shell.arc);
     const dir = shell.from.clone().multiplyScalar(a).addScaledVector(shell.target, b).normalize();
-    const radius = shell.startRadius + (1 - shell.startRadius) * t + 4 * shell.peak * t * (1 - t);
+    const radius = shell.startRadius + (shell.endRadius - shell.startRadius) * t + 4 * shell.peak * t * (1 - t);
     return dir.multiplyScalar(radius);
   }
 
@@ -4135,10 +5163,13 @@ function startBoard() {
       mods: shellMods(piece),
       from: start.clone().normalize(),
       startRadius: start.length(),
+      endRadius: 1 + groundLift(piece.fire),
       age: 0,
       mark: piece.aimMark,
     };
     shell.arc = shell.from.angleTo(shell.target);
+    if (shell.mods.pushpull) piece.perkTurn.pushpull = turnState.number;
+    piece.plainShot = false;
     shell.peak = SHELL_ARC * shell.arc;
     shell.life = (shell.arc * r) / SHELL_SPEED_MM + 0.35;
 
@@ -4174,7 +5205,7 @@ function startBoard() {
     const ball = new THREE.Mesh(glowShape, new THREE.MeshBasicMaterial({
       color: linear("#ff9a2e"), transparent: true, opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending,
     }));
-    ball.position.copy(spot);
+    ball.position.copy(spot).normalize().multiplyScalar(1 + groundLift(spot));
     ball.scale.setScalar(0.001);
     globe.add(ball);
     const blast = { ball, radius: radiusInMm / r, age: 0, life, floor: null };
@@ -4222,13 +5253,17 @@ function startBoard() {
   }
 
   function noteIfOut(team) {
+    if (team === BEETLE_TEAM) {
+      if (!teamAlive(team)) announce("The last beetle is down.");
+      return;
+    }
     if (!teamAlive(team)) announce(team === localTeam ? "You're out: all your pieces are destroyed." : `${teamName(team)} is out.`);
   }
 
   /* The piece flattens where it stood and leaves a splatter on the ground. */
   function squish(piece, killer = null) {
     const { mesh, up, team } = piece;
-    const scale = pieceScale();
+    const scale = pieceScale() * (piece.size || 1);
     removePiece(piece);
     handDown(piece);
     noteIfOut(team);
@@ -4270,7 +5305,7 @@ function startBoard() {
   }
   function poseGhost(ghost) {
     const right = new THREE.Vector3().crossVectors(ghost.up, ghost.forward);
-    ghost.mesh.position.copy(ghost.up).multiplyScalar(1 + 2 / radiusMm());   /* floats a little */
+    ghost.mesh.position.copy(ghost.up).multiplyScalar(1 + 2 / radiusMm() + groundLift(ghost.up));   /* floats a little */
     ghost.mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, ghost.up, ghost.forward));
   }
   function removeGhost(ghost) {
@@ -4317,8 +5352,40 @@ function startBoard() {
     }
   }
 
+  /* +/-: a piece hit is shoved straight away from the blast, or pulled toward it. */
+  function nudge(piece, spot, mm, mode) {
+    if (!pieces.includes(piece) || piece.decoy || piece.digging) return;
+    const away = mmBetween(spot, piece.up);
+    let axis = new THREE.Vector3().crossVectors(spot, piece.up);
+    if (axis.lengthSq() < 1e-12) {
+      if (mode === "pull") return;
+      axis = new THREE.Vector3().crossVectors(piece.up, piece.forward);
+    }
+    axis.normalize();
+    const left = mode === "pull" ? Math.min(mm, away) : mm;
+    if (left < 0.05) return;
+    piece.shove = { axis: mode === "pull" ? axis.negate() : axis, left };
+    piece.knockedTurn = turnState.number;
+  }
+
   /* Every piece near the landing spot is hurt, whichever side it is on. A kill of an
      enemy earns the piece that fired a perk, if it's still alive to take it. */
+  /* How far a blast is from a piece in mm. A beetle is big, so it counts from the
+     nearest part of its body: a blast that reaches any of it hits it in full. */
+  function blastDistance(spot, piece) {
+    if (piece.team !== BEETLE_TEAM) return mmBetween(spot, piece.up);
+    const r = radiusMm();
+    const size = piece.size || 1;
+    const halfWidth = PIECE_HALF_WIDTH_MM * size;
+    const reach = (PIECE_LENGTH_MM / 2) * size - halfWidth;   /* centre to the middle of each end */
+    let least = Infinity;
+    for (let k = -8; k <= 8; k++) {
+      const point = piece.up.clone().addScaledVector(piece.forward, (k / 8) * reach / r).normalize();
+      least = Math.min(least, mmBetween(spot, point));
+    }
+    return Math.max(0, least - halfWidth);
+  }
+
   function explode(spot, shell) {
     const piercing = shell.mods.pierce;
     const bands = shell.bands || shellBands(shell.mods);
@@ -4327,7 +5394,7 @@ function startBoard() {
     addBlast(spot, bands[bands.length - 1].within, 0.8, true);
     sound.explosion(bands[bands.length - 1].within / 40, !!shell.mods.web && !shell.mods.pierce && !shell.mods.big && !shell.self);
     for (const piece of [...pieces]) {
-      const distance = mmBetween(spot, piece.up);
+      const distance = blastDistance(spot, piece);
       const band = bands.find((b) => distance <= b.within);
       if (!band) continue;
       if (shell.self && piece === shell.shooter) continue;
@@ -4343,19 +5410,26 @@ function startBoard() {
         turnState.blocks++;
         showDamage(piece, 0);
         if (enemyOf(piece)) awardMedal(piece);
+        if (shell.mods.pushpull) nudge(piece, spot, 5, shell.mods.pushpull);
         continue;
       }
       const damage = ball ? band.ball : band.damage;
-      if (enemyOf(piece)) hurtEnemy = true;
+      if (enemyOf(piece) && piece.team !== BEETLE_TEAM) hurtEnemy = true;
+      if (piece.team === BEETLE_TEAM && damage > 0 && !shell.self && shell.shooter.team !== BEETLE_TEAM) {
+        piece.grudgeId = shell.shooter.id;
+        piece.returning = false;
+      }
       piece.hp = Math.max(0, piece.hp - damage);
       turnState.hits++;
       showDamage(piece, damage);
       showHealth(piece);
+      if (shell.mods.pushpull && piece.hp > 0) nudge(piece, spot, ball ? 5 : 10, shell.mods.pushpull);
       if (piece.hp === 0) {
         turnState.kills++;
         squish(piece, shell.shooter);
         if (shell.shooter.team !== piece.team && pieces.includes(shell.shooter) && !shell.self) {
           awardPerk(shell.shooter);
+          beetleBounty(shell.shooter, piece);
           takeSpoils(shell.shooter, piece);
         } else if (shell.shooter.team !== piece.team) creditKill(shell.shooter);
       }
@@ -4459,7 +5533,7 @@ function startBoard() {
     const spot = lastLandSpot(rock);
     if (!spot) return;
     const flag = makeFlag();
-    flag.position.copy(spot);
+    flag.position.copy(spot).multiplyScalar(1 + groundLift(spot));
     flag.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), spot);
     flag.scale.setScalar(1 / radiusMm());
     globe.add(flag);
@@ -4510,6 +5584,7 @@ function startBoard() {
     if (ice.reach < ice.goal) {
       ice.reach = Math.min(ice.goal, ice.reach + ICE_SPEED_MM * seconds);
       iceReach.value = ice.reach;
+      frostPlants();
     }
     if (puddles.length) freezePuddles();
     freezeCaught();
@@ -4768,6 +5843,7 @@ function startBoard() {
   const puddleIce = (spot) => Math.min(Infinity, ...puddles.filter((q) => q.frozen).map((q) => mmBetween(q.spot, spot) - q.radius));
 
   function clearIce() {
+    thawPlants();
     ice.rock = null;
     ice.future = null;
     showLastLand();
@@ -4849,7 +5925,7 @@ function startBoard() {
     const r = radiusMm();
     const out = { positions: [], colors: [] };
     const frames = lineFrames(points);
-    const lift = (v, mm) => v.clone().normalize().multiplyScalar(1 + mm / r);
+    const lift = (v, mm) => onGround(v.clone().normalize(), 1 + mm / r);
     frames.forEach((f, i) => {
       const pick = (list) => list[(i * 7 + points.length) % list.length];
       if (i < frames.length - 1) {
@@ -5090,7 +6166,7 @@ function startBoard() {
     const r = radiusMm();
     const out = { positions: [], colors: [] };
     const frames = lineFrames(points);
-    const lift = (v, mm) => v.clone().normalize().multiplyScalar(1 + mm / r);
+    const lift = (v, mm) => onGround(v.clone().normalize(), 1 + mm / r);
     /* walk along the line in small steps, winding the coil */
     const steps = [];
     let travelled = 0;
@@ -5232,7 +6308,7 @@ function startBoard() {
         }
         if (balled(piece)) continue;
         const enemies = piece.team !== line.owner.team;
-        if (enemies && pieces.includes(line.owner) && line.medalTurn !== turnState.number) {
+        if (enemies && piece.team !== BEETLE_TEAM && pieces.includes(line.owner) && line.medalTurn !== turnState.number) {
           line.medalTurn = turnState.number;
           awardMedal(line.owner);
         }
@@ -5322,14 +6398,14 @@ function startBoard() {
       const dir = frame.ahead.clone().applyAxisAngle(frame.origin, angle);
       const axis = new THREE.Vector3().crossVectors(frame.origin, dir).normalize();
       const reach = Math.max(1.5, (lengthMm * j) / along);
-      return frame.origin.clone().applyAxisAngle(axis, reach / r).multiplyScalar(1.0018);
+      return onGround(frame.origin.clone().applyAxisAngle(axis, reach / r), 1.0018);
     };
     const wallAt = (i, j) => {
       const axis = new THREE.Vector3().crossVectors(frame.origin, frame.ahead).normalize();
       const v = j / along;
       const reach = Math.max(1.5, lengthMm * v);
       const tall = (2 + 7 * Math.sin(Math.min(1, v * 1.6) * Math.PI * 0.5) * (1 - v * 0.55)) * (i / across);
-      return frame.origin.clone().applyAxisAngle(axis, reach / r).multiplyScalar(1.0018 + tall / r);
+      return onGround(frame.origin.clone().applyAxisAngle(axis, reach / r), 1.0018 + tall / r);
     };
     for (const at of [groundAt, wallAt]) {
       for (let j = 0; j < along; j++) {
@@ -5373,7 +6449,7 @@ function startBoard() {
       const dir = flame.ahead.clone().applyAxisAngle(flame.origin, side * 2 * half);
       const axis = new THREE.Vector3().crossVectors(flame.origin, dir).normalize();
       const reach = Math.min(flame.reach, FLAME_RANGE_MM * v);
-      const point = flame.origin.clone().applyAxisAngle(axis, reach / r).multiplyScalar(1 + (1 + v * 9 * rise) / r);
+      const point = onGround(flame.origin.clone().applyAxisAngle(axis, reach / r), 1 + (1 + v * 9 * rise) / r);
       places.setXYZ(i, point.x, point.y, point.z);
     });
     places.needsUpdate = true;
@@ -5454,7 +6530,11 @@ function startBoard() {
         piece.burnNext = turnState.number + 1;
         piece.burnBy = flame.shooter;
         setOnFire(piece, true);
-        if (enemies && !flame.medalled) {
+        if (piece.team === BEETLE_TEAM && flame.shooter.team !== BEETLE_TEAM) {
+          piece.grudgeId = flame.shooter.id;
+          piece.returning = false;
+        }
+        if (enemies && !flame.medalled && piece.team !== BEETLE_TEAM) {
           flame.medalled = true;
           awardMedal(flame.shooter);
         }
@@ -5501,6 +6581,7 @@ function startBoard() {
     if (!source || source.team === piece.team) return;
     if (pieces.includes(source)) {
       awardPerk(source);
+      beetleBounty(source, piece);
       if (byCannon) takeSpoils(source, piece);
     } else creditKill(source);
   }
@@ -5535,6 +6616,13 @@ function startBoard() {
     floatLabel(piece, "Medal of valor", "hit medal");
     if (piece === selected) drawMedals();
     if (piece.medals % medalStep(piece) === 0) awardPerk(piece, "medal");
+  }
+
+  /* A beetle killed: two more perks on top of the usual one. */
+  function beetleBounty(killer, victim) {
+    if (victim.team !== BEETLE_TEAM || killer.team === BEETLE_TEAM || !pieces.includes(killer)) return;
+    for (let k = 1; k < BEETLE_BOUNTY; k++) awardPerk(killer, "beetle");
+    announce(`${possessive(killer.team)} piece brought down a beetle: ${BEETLE_BOUNTY} perks.`, killer.up);
   }
 
   function awardPerk(piece, reason = "kill") {
@@ -5726,6 +6814,7 @@ function startBoard() {
       perks: [...piece.perks], perksOn: new Set(piece.perksOn), slowFrom: piece.slowFrom, slowTurn: piece.slowTurn,
     });
     decoy.perksOn.delete("decoy");
+    setHat(decoy, piece.hatIndex);
     if (hasPerk(decoy, "tunnel") && !restsClear(decoy.up, decoy.plan)) decoy.plan = digThrough(decoy.up, decoy.plan);
     if (decoy.curl) poseCurl(decoy);
     showHealth(decoy);
@@ -5762,9 +6851,9 @@ function startBoard() {
     for (const piece of pieces) {
       if (!piece.decoy && balled(piece) && mmBetween(spot, piece.up) <= radius) packPain(piece, shell);
     }
-    const web = { spot: spot.clone(), radius, age: 0, lastTurn: turnState.number + WEB_EXTRA_TURNS, caught: new Set() };
+    const web = { spot: spot.clone(), radius, age: 0, lastTurn: turnState.number + WEB_EXTRA_TURNS, caught: new Set(), heading: Math.random() * Math.PI * 2 };
     web.mesh = new THREE.Mesh(
-      surfacePatch(web.spot, (radius * 2) / radiusMm(), Math.random() * Math.PI * 2),
+      surfacePatch(web.spot, (radius * 2) / radiusMm(), web.heading),
       new THREE.MeshBasicMaterial({ map: webTexture(), transparent: true, opacity: 0, depthWrite: false })
     );
     globe.add(web.mesh);
@@ -5814,7 +6903,7 @@ function startBoard() {
       if (enemies && !target.decoy) awardMedal(target);
       return;
     }
-    if (enemies && !target.decoy) awardMedal(attacker);
+    if (enemies && !target.decoy && target.team !== BEETLE_TEAM) awardMedal(attacker);
     target.hp = Math.max(0, target.hp - MELEE_DAMAGE);
     turnState.hits++;
     showDamage(target, MELEE_DAMAGE);
@@ -5822,7 +6911,10 @@ function startBoard() {
     if (target.hp === 0) {
       turnState.kills++;
       squish(target, attacker);
-      if (attacker.team !== target.team) awardPerk(attacker);
+      if (attacker.team !== target.team) {
+        awardPerk(attacker);
+        beetleBounty(attacker, target);
+      }
     }
   }
 
@@ -5850,7 +6942,7 @@ function startBoard() {
     const r = radiusMm();
     const spot = piece.up.clone().addScaledVector(piece.forward, ((entering ? 1 : -1) * PIECE_LENGTH_MM * 0.5) / r).normalize();
     const mouth = new THREE.Group();
-    mouth.position.copy(spot);
+    mouth.position.copy(spot).multiplyScalar(1 + groundLift(spot));
     mouth.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), spot);
     mouth.scale.setScalar(1 / r);
     const hole = new THREE.Mesh(tunnelParts.hole, tunnelParts.holePaint);
@@ -5883,12 +6975,17 @@ function startBoard() {
     stepShots(seconds);
     stepBooms(seconds);
     if (ghosts.length) stepGhosts(seconds);
+    for (const bend of terrain.bends) {
+      if (bend.grow >= 1) continue;
+      bend.grow = Math.min(1, bend.grow + seconds / EARTH_BEND_SECONDS);
+      bend.dirty = true;
+    }
     if (ice.rock) stepIce(seconds);
     needsDraw = true;
     if (flames.length) scorch();
     if (wires.length) snagOnWire();
     const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS);
-    if (busy || shells.length || blasts.length || squishes.length || ghosts.length) return;
+    if (busy || shells.length || blasts.length || squishes.length || ghosts.length || terrain.bends.some((bend) => bend.grow < 1)) return;
     /* Once everything else is done, the ice spreads, unless the game is already won. */
     if (ice.rock && !ice.spread && sidesLeft() > 1) {
       ice.spread = true;
@@ -5955,6 +7052,14 @@ function startBoard() {
   }
 
   function stopPiece(piece) {
+    /* Doping: the move is over, so the shot goes now, from here, with no cannon perks */
+    if (piece.dopeFire) {
+      piece.dopeFire = false;
+      if (piece.fire && pieces.includes(piece)) {
+        piece.plainShot = true;
+        piece.shot = { stage: "aim", time: 0, glow: null };
+      }
+    }
     piece.turnOverlap = null;
     piece.move = null;
     piece.plan2 = null;
@@ -5995,6 +7100,8 @@ function startBoard() {
     const popped = new Set();
     const hits = [];
     const rolledInto = [];
+    const rams = [];
+    const charging = (p) => p.team === BEETLE_TEAM && crawled.has(p) && !!p.move;
     pieces.forEach((a, i) => {
       for (const b of pieces.slice(i + 1)) {
         if (!crawled.has(a) && !crawled.has(b)) continue;
@@ -6013,6 +7120,14 @@ function startBoard() {
         if (a.decoy || b.decoy) {
           if (a.decoy) popped.add(a);
           if (b.decoy) popped.add(b);
+        } else if (charging(a) || charging(b)) {
+          /* A charging beetle doesn't stop: it rams what it runs into, once each. */
+          const ram = charging(a) ? a : b;
+          const other = ram === a ? b : a;
+          if (other.team !== BEETLE_TEAM && !(ram.rammed || (ram.rammed = new Set())).has(other)) {
+            ram.rammed.add(other);
+            rams.push([ram, other]);
+          }
         } else if (a.tumble || b.tumble) {
           /* A rolling ball hits what it runs into, once each, and keeps rolling. */
           const roller = a.tumble ? a : b;
@@ -6039,17 +7154,18 @@ function startBoard() {
     }
     for (const [attacker, target] of hits) meleeHit(attacker, target);
     for (const [roller, target] of rolledInto) tumbleHit(roller, target);
+    for (const [ram, target] of rams) beetleHit(ram, target);
   }
 
-  /* Which way a piece hit by a rolling ball flies: straight out to the side of the
-     ball's path, on whichever side it was hit. Hit dead centre, it goes to one side. */
+  /* Which way a piece hit by a rolling ball or a charging beetle flies: straight out to
+     the side of its path, on whichever side it was hit. Hit dead centre, it goes to one side. */
   function bounceAxis(roller, target) {
     const out = new THREE.Vector3().crossVectors(roller.up, target.up);
-    if (!roller.tumble) return out.normalize();
-    /* Everything is measured flat at the ball: the way it rolls, and the line square to
-       that. The piece goes along that square line, on its own side of the path. */
-    const travel = new THREE.Vector3().crossVectors(roller.tumble.axis, roller.up).normalize();
-    const across = roller.tumble.axis.clone().normalize();
+    if (!roller.tumble && roller.team !== BEETLE_TEAM) return out.normalize();
+    /* Everything is measured flat at the roller: the way it goes, and the line square to
+       that. The piece goes along that square line, on its own side of the path. A beetle
+       charges the way it faces. */
+    const across = roller.tumble ? roller.tumble.axis.clone().normalize() : new THREE.Vector3().crossVectors(roller.up, roller.forward).normalize();
     const offset = target.up.clone().sub(roller.up);
     const sideways = offset.dot(across);
     const side = across.multiplyScalar(Math.abs(sideways) > 1e-9 ? Math.sign(sideways) : 1);
@@ -6118,6 +7234,33 @@ function startBoard() {
     floatLabel(piece, "Rolling Destruction", "hit");
   }
 
+  /* A beetle's charge: 25 damage and a 20 mm knock out to the side; a ball takes no damage. */
+  function beetleHit(beetle, target) {
+    if (!pieces.includes(target) || target.digging) return;
+    if (target.decoy) {
+      vanish(target);
+      return;
+    }
+    /* knocked out to the side of the charge, like Rolling Destruction, so it isn't
+       carried along in front of the beetle */
+    stopPiece(target);
+    target.shove = { axis: bounceAxis(beetle, target), left: BEETLE_KNOCK_MM };
+    target.knockedTurn = turnState.number;
+    floatLabel(target, "Rammed", "hit");
+    if (balled(target)) {
+      showDamage(target, 0);
+      return;
+    }
+    target.hp = Math.max(0, target.hp - BEETLE_DAMAGE);
+    turnState.hits++;
+    showDamage(target, BEETLE_DAMAGE);
+    showHealth(target);
+    if (target.hp === 0) {
+      turnState.kills++;
+      squish(target, beetle);
+    }
+  }
+
   /* What a rolling ball does to a piece it runs into. A ball it hits takes no damage
      but still flies. Damaging an enemy earns the roller a medal, as a shell would. */
   function tumbleHit(roller, target) {
@@ -6136,7 +7279,7 @@ function startBoard() {
       if (enemies) awardMedal(target);
       return;
     }
-    if (enemies) awardMedal(roller);
+    if (enemies && target.team !== BEETLE_TEAM) awardMedal(roller);
     target.hp = Math.max(0, target.hp - TUMBLE_DAMAGE);
     turnState.hits++;
     showDamage(target, TUMBLE_DAMAGE);
@@ -6144,7 +7287,10 @@ function startBoard() {
     if (target.hp === 0) {
       turnState.kills++;
       squish(target, roller);
-      if (enemies && pieces.includes(roller)) awardPerk(roller);
+      if (enemies && pieces.includes(roller)) {
+        awardPerk(roller);
+        beetleBounty(roller, target);
+      }
     }
   }
 
@@ -6213,7 +7359,7 @@ function startBoard() {
 
   /* Each piece turns on the spot to face its target, then crawls straight to it. */
   function advanceMovers(seconds) {
-    const before = new Map(pieces.map((p) => [p, { up: p.up.clone(), forward: p.forward.clone(), curl: p.curl }]));
+    const before = new Map(pieces.map((p) => [p, { up: p.up.clone(), forward: p.forward.clone(), curl: p.curl, size: p.size }]));
     const crawled = new Set();
     for (const piece of [...pieces]) if (piece.strikeAt && !piece.shot) rollAt(piece);
 
@@ -6327,7 +7473,7 @@ function startBoard() {
       return dot;
     });
     mesh.add(stalk, cap);
-    mesh.position.copy(spot);
+    mesh.position.copy(spot).normalize().multiplyScalar(1 + groundLift(spot));
     mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), spot);
     mesh.rotateY(Math.random() * Math.PI * 2);
     const tag = document.createElement("div");
@@ -6410,7 +7556,8 @@ function startBoard() {
   /* The chance comes first, so a turn with no room is simply a turn with no mushroom. */
   function sproutMushroom() {
     if (rand() >= MUSHROOM_CHANCE) return;
-    const count = rand() < MUSHROOM_PAIR_CHANCE ? 2 : 1;
+    const roll = rand();
+    const count = roll < MUSHROOM_TRIO_CHANCE ? 3 : roll < MUSHROOM_TRIO_CHANCE + MUSHROOM_PAIR_CHANCE ? 2 : 1;
     const sprouted = [];
     for (let n = 0; n < count; n++) {
       for (let tries = 0; tries < MUSHROOM_SPOT_TRIES; tries++) {
@@ -6424,7 +7571,7 @@ function startBoard() {
         break;
       }
     }
-    if (sprouted.length === 2) announce(`Two mushrooms have sprouted! They bloom in ${MUSHROOM_BUD_TURNS} turns.`, sprouted[0]);
+    if (sprouted.length >= 2) announce(`${sprouted.length === 3 ? "Three" : "Two"} mushrooms have sprouted! They bloom in ${MUSHROOM_BUD_TURNS} turns.`, sprouted[0]);
     else if (sprouted.length) announce(`A mushroom has sprouted! It blooms in ${MUSHROOM_BUD_TURNS} turns.`, sprouted[0]);
   }
 
@@ -6453,7 +7600,7 @@ function startBoard() {
       if (mushroom.gone || mushroom.stage !== "open") continue;
       const point = { up: mushroom.up, forward: mushroom.up, curl: 1 };
       const reachGap = (piece) => pieceGap(piece, point, radiusMm()) + PIECE_HALF_WIDTH_MM - MUSHROOM_RADIUS_MM;
-      const closest = pieces.filter((p) => !p.decoy).reduce((a, b) => (a && reachGap(a) <= reachGap(b) ? a : b), null);
+      const closest = pieces.filter((p) => !p.decoy && p.team !== BEETLE_TEAM).reduce((a, b) => (a && reachGap(a) <= reachGap(b) ? a : b), null);
       if (!closest || reachGap(closest) > 0) continue;
       dropMushroom(mushroom);
       turnState.mushrooms++;
@@ -6568,6 +7715,7 @@ function startBoard() {
       button("Play again", () => {
         resultsBox.hidden = true;
         clearPieces();
+        setOutBots();
       }, true);
     }
     resultsNote.textContent = note;
@@ -6637,12 +7785,12 @@ function startBoard() {
     groundRadius.value = mm / 2;
     diameterValue.textContent = mm + " mm";
     for (const piece of pieces) {
-      sizePiece(piece.mesh, pieceScale());
+      sizePiece(piece.mesh, pieceScale() * (piece.size || 1));
       /* A planned spot stays put on the globe, so resizing can push it out of range. */
       /* The longer orders depend on rocks and distances, so they start over. */
       piece.plan2 = piece.decoyPlan = null;
       if (piece.plan && (!restsClear(piece.up, piece.plan) || mmBetween(piece.up, piece.plan) > moveReach(piece))) piece.plan = null;
-      if (piece.fire && mmBetween(piece.up, piece.fire) > FIRE_RANGE_MM) piece.fire = null;
+      if (piece.fire && mmBetween(piece.up, piece.fire) > cannonReach(piece.up, piece.fire)) piece.fire = null;
       drawArrow(piece);
     }
     if (bot.ready) chooseBotMoves();   /* its spots may no longer be in reach */
@@ -6670,8 +7818,8 @@ function startBoard() {
     updateScaleBar();
     needsDraw = true;
   }
-  diameterInput.addEventListener("input", () => setDiameter(Number(diameterInput.value)));
-  botInput.addEventListener("input", () => setBotCount(Number(botInput.value)));
+  diameterInput.addEventListener("input", () => { setDiameter(Number(diameterInput.value)); setOutBots(); });
+  botInput.addEventListener("input", () => { setBotCount(Number(botInput.value)); setOutBots(); });
   /* A new setting starts the clock over at the new length. */
   function setTimerLimit(seconds) {
     turnTimer.limit = seconds;
@@ -6680,6 +7828,12 @@ function startBoard() {
     drawTimer();
   }
   timerInput.addEventListener("input", () => setTimerLimit(Number(timerInput.value)));
+  function setBeetleCount(count) {
+    beetleCount = Math.min(6, Math.max(1, Math.round(Number(count) || 2)));
+    beetleInput.value = beetleCount;
+    beetleValue.textContent = beetleCount;
+  }
+  beetleInput.addEventListener("input", () => { setBeetleCount(beetleInput.value); setOutBots(); });
   function setIceSteps(steps) {
     iceSteps = steps.map((mm) => Math.min(40, Math.max(5, Math.round(Number(mm) || 0))));
     iceSteps.forEach((mm, i) => {
@@ -6702,7 +7856,7 @@ function startBoard() {
     say(idleMessage());
   });
   doneButton.addEventListener("click", endTurn);
-  clearButton.addEventListener("click", clearPieces);
+  clearButton.addEventListener("click", () => { clearPieces(); setOutBots(); });
   document.getElementById("reset").addEventListener("click", resetView);
 
   /* ---------- Online play ----------
@@ -6743,7 +7897,7 @@ function startBoard() {
      links to other things, which are sent as ids instead. */
   const PIECE_SKIP = new Set(["mesh", "tag", "arrow", "aimMark", "aimMark2", "extraArrows", "legs", "antennae", "curlParts",
     "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "flameMark",
-    "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt", "turnOverlap"]);
+    "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt", "turnOverlap", "dopeFire", "plainShot", "rammed", "hatMesh"]);
   function packPiece(piece) {
     const out = {};
     for (const [key, value] of Object.entries(piece)) {
@@ -6757,7 +7911,7 @@ function startBoard() {
   }
   const ORDER_KEYS = ["plan", "plan2", "decoyPlan", "fire", "fire2", "flameAt", "railPath"];
   const packOrders = (piece) => {
-    const out = { roll: !!piece.roll, perksOn: [...piece.perksOn] };
+    const out = { roll: !!piece.roll, perksOn: [...piece.perksOn], pushMode: piece.pushMode || null };
     for (const key of ORDER_KEYS) out[key] = piece[key] ? packValue(piece[key]) : null;
     return out;
   };
@@ -6778,6 +7932,7 @@ function startBoard() {
         hitBy: [...line.hitBy].filter(([q]) => pieces.includes(q)).map(([q, turn]) => [q.id, turn]), medalTurn: line.medalTurn ?? null })),
       mushrooms: mushrooms.filter((m) => !m.gone).map((m) => ({ up: V(m.up), stage: m.stage, turns: m.turns })),
       frozen: frozen.map((mesh) => mesh.userData.frozenData).filter(Boolean),
+      bends: terrain.bends.map((bend) => ({ at: V(bend.at), apex: bend.apex })),
       ice: { rock: ice.rock ? rocks.indexOf(ice.rock) : -1, future: ice.future ? rocks.indexOf(ice.future) : -1, reach: ice.reach, goal: ice.goal, spreads: ice.spreads, steps: iceSteps },
       picks,
     };
@@ -6827,6 +7982,8 @@ function startBoard() {
       piece.burnBy = data.burnBy != null ? wanted.get(data.burnBy) || null : null;
       piece.move = piece.shot = piece.shove = piece.tumble = piece.boom = piece.igloo = piece.ride = null;
       poseOnSphere(piece);
+      sizePiece(piece.mesh, pieceScale() * (piece.size || 1));
+      if (piece.team !== BEETLE_TEAM && (!piece.hatMesh || piece.hatMesh.userData.index !== piece.hatIndex)) setHat(piece, piece.hatIndex);
       poseCurl(piece);
       showHealth(piece);
       piece.tag.classList.toggle("perked", piece.perks.length > 0);
@@ -6932,6 +8089,10 @@ function startBoard() {
     ice.reach = snap.ice.reach;
     ice.goal = snap.ice.goal;
     ice.spreads = snap.ice.spreads;
+    if (snap.bends && !same(snap.bends, terrain.bends.map((bend) => ({ at: V(bend.at), apex: bend.apex })))) {
+      terrain.bends = snap.bends.map((bend) => ({ at: toV(bend.at), apex: bend.apex, grow: 1 }));
+      refreshGround();
+    }
     if (Array.isArray(snap.ice.steps)) setIceSteps(snap.ice.steps);
     iceReach.value = ice.rock ? ice.reach : -1e5;
     if (ice.rock && ice.mark) {
@@ -7093,6 +8254,7 @@ function startBoard() {
     localTeam = "you";
     clearPieces();
     setBotCount(Number(botInput.value));
+    setOutBots();
     document.getElementById("youDot").style.background = "var(--team-you)";
     document.querySelectorAll(".names .dot").forEach((dot) => { dot.style.background = "var(--team-you)"; });
     onlineChip.textContent = "Back in the room for another game.";
@@ -7124,6 +8286,7 @@ function startBoard() {
     timerInput.value = data.timer;
     setTimerLimit(data.timer);
     if (Array.isArray(data.iceSteps)) setIceSteps(data.iceSteps);
+    if (data.beetles) setBeetleCount(data.beetles);
     setBotCount(botTeams().length);
     pieceCount = 0;
     seedRand(data.seed);
@@ -7225,6 +8388,7 @@ function startBoard() {
       for (const key of ORDER_KEYS) piece[key] = order && order[key] ? unpackValue(order[key]) : null;
       piece.roll = !!(order && order.roll);
       piece.perksOn = new Set(order ? order.perksOn : []);
+      piece.pushMode = order && order.pushMode ? order.pushMode : piece.pushMode;
       drawArrow(piece);
     }
     net.done.clear();
@@ -7449,7 +8613,7 @@ function startBoard() {
     const hostName = (room.players.find((player) => player.id === room.host) || {}).name || "?";
     const seats = plannedSeats();
     lobbyScreen(net.host ? "Your game" : `${hostName}'s game`, net.host
-      ? `Uses your settings from the panel: ${board.diameter} mm sphere, ${seats.filter((seat) => !seat.human).length} bots, ${clockText(turnTimer.limit)} turns, ice spreading ${iceSteps.join(" / ")} mm. Change them there before you start.`
+      ? `Uses your settings from the panel: ${board.diameter} mm sphere, ${seats.filter((seat) => !seat.human).length} bots, ${clockText(turnTimer.limit)} turns, ${beetleCount} beetle${beetleCount === 1 ? "" : "s"}, ice spreading ${iceSteps.join(" / ")} mm. Change them there before you start.`
       : `Waiting for ${hostName} to start the game. The host chooses the sphere, the bots and the turn timer.`);
     const list = document.createElement("ul");
     list.className = "lobby-list";
@@ -7472,7 +8636,7 @@ function startBoard() {
     if (net.host) {
       const start = lobbyButton("Start the game", () => {
         const data = { t: "start", seats: plannedSeats(), seed: Math.floor(Math.random() * 2 ** 31), rockSeed: Math.floor(Math.random() * 1e9),
-          diameter: board.diameter, timer: turnTimer.limit, iceSteps };
+          diameter: board.diameter, timer: turnTimer.limit, iceSteps, beetles: beetleCount };
         send({ t: "begin" });
         toOthers(data);
         beginOnline(data);
@@ -7485,7 +8649,7 @@ function startBoard() {
   playOnlineButton.addEventListener("click", () => (net.ws ? (net.room ? showRoom() : showLobbyList()) : showNameEntry()));
   leaveOnlineButton.addEventListener("click", () => location.reload());
   /* While in a room, the host's own panel settings show up in the room as they change. */
-  for (const input of [diameterInput, botInput, timerInput, ...iceStepInputs]) {
+  for (const input of [diameterInput, botInput, timerInput, beetleInput, ...iceStepInputs]) {
     input.addEventListener("input", () => {
       if (net.room && !net.inGame && !lobby.hidden) showRoom();
     });
@@ -7499,12 +8663,13 @@ function startBoard() {
   }
 
   /* Board data for the game rules that come next, and for testing. */
-  window.globeBoard = { board, pieces, shells, blasts, splats, squishes, ghosts, rocks, mushrooms, webs, flames, tunnels, rails, wires, puddles, ice, frozen, iceDistance, rockGap, sphereToRock, rockDistance, view, turnState, pieceGap: (a, b) => pieceGap(a, b, radiusMm()), net, team: () => localTeam, isOver: () => gameOver };
+  window.globeBoard = { board, pieces, shells, blasts, splats, squishes, ghosts, terrain, elevation, cannonReach, rocks, mushrooms, webs, flames, tunnels, rails, wires, puddles, ice, frozen, iceDistance, rockGap, sphereToRock, rockDistance, view, turnState, pieceGap: (a, b) => pieceGap(a, b, radiusMm()), net, team: () => localTeam, isOver: () => gameOver };
   board.diameter = Number(diameterInput.value);
   groundRadius.value = board.diameter / 2;
   diameterValue.textContent = board.diameter + " mm";
   clearPieces();
   setBotCount(Number(botInput.value));
+  setOutBots();
 
   new ResizeObserver(resize).observe(stage);
   resize();
