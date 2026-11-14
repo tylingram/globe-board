@@ -981,7 +981,7 @@ const PERKS = [
   { id: "rolling", type: "ball", cools: 2, name: "Rolling Destruction", text: "Switch on, then roll into a ball: if an enemy shell or flame hits the ball this turn, it rolls 50 mm toward the piece that fired. Anything it rolls into takes 20 damage and is knocked 20 mm. Then it needs 2 turns before it can do that again." },
   { id: "igloo", type: "ball", cools: 2, name: "Igloo", text: "Switch on, then roll into a ball: if the ice catches it this turn, the ball rolls itself off the ice, unharmed. Then it needs 2 turns before it can do that again." },
   { id: "darkarts", type: "ball", cools: 2, name: "Dark Arts", text: "Switch on, then roll up on a fallen teammate's blood splatter to bring that piece back at 25 HP, with no perks. Then it needs 2 turns before it can do that again." },
-  { id: "pain", type: "ball", name: "Pain packet", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell." },
+  { id: "pain", type: "ball", cools: 2, name: "Pain packet", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell. After those two shots it needs 2 turns before it can do that again." },
   { id: "pushpull", type: "fire", cools: 2, name: "+/-", text: "Tap to switch it on as Push, tap again for Pull. Every piece the shell hurts is shoved 10 mm straight away from where it lands, or pulled 10 mm toward it; a piece rolled into a ball takes no damage but still moves 5 mm. Then it needs 2 turns before it can be used again." },
   { id: "doping", type: "move", cools: 2, name: "Doping", text: "Costs 10 HP. Give the piece a move, then aim its shot: it moves, then fires from where it ends up, with no cannon perks. Needs more than 10 HP. Then it needs 2 turns before it can be used again." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
@@ -6857,6 +6857,7 @@ function startBoard() {
   function packPain(piece, shell) {
     if (!perkOn(piece, "pain") || piece.team === shell.shooter.team) return;
     piece.painTurn = turnState.number + 1;
+    piece.perkTurn.pain = piece.painTurn;   /* the 2-turn wait starts with the two shots */
     floatLabel(piece, "Pain packet", "hit");
     if (piece.team === localTeam) announce(`Pain packet! ${piece.record ? piece.record.name : "Your piece"} can fire two shots next turn.`);
   }
