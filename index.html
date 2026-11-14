@@ -946,7 +946,7 @@ const MUSHROOM_TRIO_CHANCE = 0.25;   /* that three sprout at once */
 const MUSHROOM_PAIR_CHANCE = 0.5;    /* that two do; otherwise one */
 const MUSHROOM_CLEARANCE_MM = 50;    /* it always sprouts farther than this from every piece */
 const MUSHROOM_BUD_TURNS = 2;        /* turns before it blooms */
-const MUSHROOM_BLOOM_TURNS = 3;      /* turns in bloom before it wilts */
+const MUSHROOM_BLOOM_TURNS = 5;      /* turns in bloom before it wilts */
 const MUSHROOM_RADIUS_MM = 4.5;      /* reach of the cap, for contact */
 const MUSHROOM_SPOT_TRIES = 400;     /* random spots to try before giving up for this turn */
 const MUSHROOM_GROW_SECONDS = 0.5;   /* opening, or shrinking away */
@@ -963,7 +963,7 @@ const FLAME_HOLD_SECONDS = 1;        /* a plume burns at least this long, so it 
 const FLAME_GROW_SECONDS = 0.25;     /* it shoots out to full length in this time */
 const WIRE_DAMAGE = 10;
 const WIRE_REACH_MM = 0.9;           /* how far the barbs stick out from the wire */
-const RAIL_SPEED_MM = 30;            /* riding the railroad, per second */
+const RAIL_SPEED_MM = 40;            /* riding the railroad, per second */
 const RAIL_STEP_MM = 2;              /* distance between track points */
 const RAIL_JOIN_MM = 3;              /* track this close to other track joins it */
 const RAIL_PICK_MM = 4;              /* how close a click must be to count as on the track */
@@ -1006,7 +1006,7 @@ const PERKS = [
   { id: "pierce", type: "fire", name: "Armor Piercing shell", text: "Hits only within 5 mm (10 mm with Big shell): 50 to a piece, 25 to a ball, and the same with Big shell. Combines with Web and Big shell." },
   { id: "web", type: "fire", name: "Web", text: "The shell spins a web 30 mm wide (60 mm with Big shell) that stays for three turns. Anything entering it moves 20 mm at half speed on the following turn. On its own it does 50 on a direct hit, within 5 mm, and 10 within 10 mm; with Armor Piercing or Big shell it does theirs instead." },
   { id: "decoy", type: "move", name: "Decoy", text: "Send a fake copy on a second move. It lasts until next turn. With Barbed Wire or Rail Road on, it lays fake wire or track: real to everyone else, but harmless, and gone when anything touches it or next turn. Can't be used two turns in a row.", cools: true },
-  { id: "railroad", type: "move", name: "Rail Road", text: "Lays track behind the piece as it moves, through its tunnels too. Any piece whose move lands on track can then ride anywhere on the joined-up railroad, at 30 mm/s, but can't stop on track inside rock. Can't be used two turns in a row.", cools: true },
+  { id: "railroad", type: "move", name: "Rail Road", text: "Lays track behind the piece as it moves, through its tunnels too. Any piece whose move lands on track can then ride anywhere on the joined-up railroad, at 40 mm/s, but can't stop on track inside rock. Can't be used two turns in a row.", cools: true },
   { id: "barbed", type: "move", name: "Barbed Wire", text: "Lays barbed wire behind the piece as it moves. Any enemy piece that touches it takes 10 damage, once per stretch of wire each turn; your own side can cross it safely. Can't be used two turns in a row.", cools: true },
   { id: "melee", type: "move", name: "Melee", text: "Running into a piece does 15 damage and knocks it 10 mm away. Can't be used two turns in a row.", cools: true },
   { id: "flame", type: "fire", name: "Flame Thrower", text: "Breathes a plume of flame as well as firing the cannon. Aim the flame first, within 75 mm, then pick a cannon shot too if you want one. The plume is a 7\u00b0 slice reaching 75 mm. Anything that touches it takes 20 damage, then 5 more at the start of each of the next 2 turns." },
@@ -6432,7 +6432,7 @@ function startBoard() {
     needsDraw = true;
   }
 
-  /* Riding: point to point along the route, at 30 mm/s. */
+  /* Riding: point to point along the route, at 40 mm/s. */
   function stepRide(piece, seconds) {
     const ride = piece.ride;
     let budget = (RAIL_SPEED_MM * seconds) / radiusMm();
