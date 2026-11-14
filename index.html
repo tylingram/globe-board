@@ -500,7 +500,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
 
     <section class="group">
       <span class="label">Beetles</span>
-      <p class="note">Rhinoceros beetles, three times a piece's size with 150 HP, each guard a hill. A beetle charges any piece within 50 mm, ploughing straight through and doing 25 damage to everything it runs into (a ball takes none), and it chases whoever shoots it. It gives up a chase once it is 100 mm outside its territory and heads home. It heals 5 HP a turn. Hurting one earns no medals; killing one earns 3 perks.</p>
+      <p class="note">Rhinoceros beetles, three times a piece's size with 150 HP, each guard a hill. A beetle charges any piece within 50 mm, ploughing straight through and doing 25 damage to everything it runs into and knocking it 20 mm out to the side (a ball takes no damage), and it chases whoever shoots it. It gives up a chase once it is 100 mm outside its territory and heads home. It heals 5 HP a turn. Hurting one earns no medals; killing one earns 3 perks.</p>
     </section>
 
     <section class="group">
@@ -1048,7 +1048,7 @@ const BEETLE_HP = 150;
 const BEETLE_MOVE_MM = 45;
 const BEETLE_SPEED = 1.3;       /* times a piece's crawl */
 const BEETLE_DAMAGE = 25;       /* to each piece it runs into */
-const BEETLE_KNOCK_MM = 15;
+const BEETLE_KNOCK_MM = 20;
 const BEETLE_REGEN = 5;         /* HP a turn */
 const BEETLE_HOME_MM = 50;      /* its territory, around a hill */
 const BEETLE_SIGHT_MM = 50;     /* it goes for any piece this close */
@@ -7157,15 +7157,15 @@ function startBoard() {
     for (const [ram, target] of rams) beetleHit(ram, target);
   }
 
-  /* Which way a piece hit by a rolling ball flies: straight out to the side of the
-     ball's path, on whichever side it was hit. Hit dead centre, it goes to one side. */
+  /* Which way a piece hit by a rolling ball or a charging beetle flies: straight out to
+     the side of its path, on whichever side it was hit. Hit dead centre, it goes to one side. */
   function bounceAxis(roller, target) {
     const out = new THREE.Vector3().crossVectors(roller.up, target.up);
-    if (!roller.tumble) return out.normalize();
-    /* Everything is measured flat at the ball: the way it rolls, and the line square to
-       that. The piece goes along that square line, on its own side of the path. */
-    const travel = new THREE.Vector3().crossVectors(roller.tumble.axis, roller.up).normalize();
-    const across = roller.tumble.axis.clone().normalize();
+    if (!roller.tumble && roller.team !== BEETLE_TEAM) return out.normalize();
+    /* Everything is measured flat at the roller: the way it goes, and the line square to
+       that. The piece goes along that square line, on its own side of the path. A beetle
+       charges the way it faces. */
+    const across = roller.tumble ? roller.tumble.axis.clone().normalize() : new THREE.Vector3().crossVectors(roller.up, roller.forward).normalize();
     const offset = target.up.clone().sub(roller.up);
     const sideways = offset.dot(across);
     const side = across.multiplyScalar(Math.abs(sideways) > 1e-9 ? Math.sign(sideways) : 1);
@@ -7234,17 +7234,17 @@ function startBoard() {
     floatLabel(piece, "Rolling Destruction", "hit");
   }
 
-  /* A beetle's charge: 25 damage and a 15 mm knock aside; a ball takes no damage. */
+  /* A beetle's charge: 25 damage and a 20 mm knock out to the side; a ball takes no damage. */
   function beetleHit(beetle, target) {
     if (!pieces.includes(target) || target.digging) return;
     if (target.decoy) {
       vanish(target);
       return;
     }
-    const axis = new THREE.Vector3().crossVectors(beetle.up, target.up);
-    if (axis.lengthSq() < 1e-12) axis.crossVectors(beetle.up, beetle.forward).negate();
+    /* knocked out to the side of the charge, like Rolling Destruction, so it isn't
+       carried along in front of the beetle */
     stopPiece(target);
-    target.shove = { axis: axis.normalize(), left: BEETLE_KNOCK_MM };
+    target.shove = { axis: bounceAxis(beetle, target), left: BEETLE_KNOCK_MM };
     target.knockedTurn = turnState.number;
     floatLabel(target, "Rammed", "hit");
     if (balled(target)) {
