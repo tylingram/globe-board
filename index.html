@@ -1951,7 +1951,7 @@ function outlineDistance(outline, x, y) {
   const g = outline.grid;
   const cx = Math.floor((x - g.x0) / g.size);
   const cy = Math.floor((y - g.y0) / g.size);
-  if (cx < 0 || cy < 0 || cx >= g.nx || cy >= g.ny) return CLIFF_NEAR_MM;
+  if (!(cx >= 0 && cy >= 0 && cx < g.nx && cy < g.ny)) return CLIFF_NEAR_MM;   /* written so NaN lands here too */
   const list = g.cells[cy * g.nx + cx];
   let best = CLIFF_NEAR_MM;
   for (let n = 0; n < list.length; n++) {
@@ -3965,7 +3965,9 @@ function startBoard() {
   function pathIsClear(from, to) {
     const axis = new THREE.Vector3().crossVectors(from, to).normalize();
     const distance = from.angleTo(to);
-    const steps = Math.ceil((distance * radiusMm()) / 2);
+    /* a path of no length: just the spot itself (0 steps would make every point NaN) */
+    const steps = Math.max(1, Math.ceil((distance * radiusMm()) / 2));
+    if (axis.lengthSq() < 1e-12) return rockGap({ up: from.clone(), forward: tangentPair(from)[0], curl: 0 }) >= 0.3;
     let last = Infinity;
     for (let i = 0; i <= steps; i++) {
       const up = from.clone().applyAxisAngle(axis, (distance * i) / steps);
