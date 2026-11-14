@@ -1032,7 +1032,7 @@ const PERKS = [
   { id: "indomitable", type: "fire", passive: true, cools: 2, name: "Indomitable Will", text: "Always on: a direct hit on a turn this piece fires its cannon does 49 damage instead of 50. Then it needs 2 turns before it can do that again." },
   { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: while the piece is moving, nothing but a cannon shell, a Self Destruct or the ice can hurt it. Then it needs 3 turns before it can be used again." },
   { id: "tamer", type: "fire", cools: 2, name: "Beetle Tamer", text: "If this turn's shell hits a beetle, you control that beetle next turn: pick it and send it charging, up to 45 mm. It won't ram your own pieces or hold a grudge for the shot. Then it needs 2 turns before it can be used again." },
-  { id: "emp", type: "ball", name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work." },
+  { id: "emp", type: "ball", cools: 2, name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work. Then it needs 2 turns before it can be used again." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
 const BIG_RADIUS_MM = BLAST_RADIUS_MM * 2;
@@ -5311,7 +5311,7 @@ function startBoard() {
           floatLabel(piece, "+" + RECUPERATE_HP, "hit heal");
         }
         if (perkOn(piece, "selfdestruct")) piece.boom = { time: 0, glow: null };
-        if (perkOn(piece, "emp") && !piece.decoy) piece.emp = { time: 0 };
+        if (perkOn(piece, "emp") && perkReady(piece, "emp") && !piece.decoy) piece.emp = { time: 0 };
       }
     }
     moving = movers.length + gunners.length > 0 || pieces.some((p) => p.curl !== p.curlGoal) || !!ice.rock;
@@ -7707,6 +7707,7 @@ function startBoard() {
   /* EMP: a shock wave 50 mm round the ball. Pieces it catches that aren't balls lose
      their cannon and perks next turn, and crackle with sparks until then. */
   function empPulse(piece) {
+    piece.perkTurn.emp = turnState.number;
     addBlast(piece.up.clone(), EMP_RADIUS_MM, 0.7, true, { ball: "#7fd8ff", floor: "#3fa9f5" });
     floatLabel(piece, "EMP", "hit heal");
     let caught = 0, yours = 0;
