@@ -1024,6 +1024,7 @@ const PERKS = [
   { id: "pain", type: "ball", cools: 2, name: "Pain packer", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell. After those two shots it needs 2 turns before it can do that again." },
   { id: "pushpull", type: "fire", cools: 2, name: "+/-", text: "Tap to switch it on as Push, tap again for Pull. Every piece the shell hurts is shoved 10 mm straight away from where it lands, or pulled 10 mm toward it; a piece rolled into a ball takes no damage but still moves 5 mm. Then it needs 2 turns before it can be used again." },
   { id: "doping", type: "move", cools: 2, name: "Doping", text: "Costs 10 HP. Give the piece a move, then aim its shot: it moves, then fires from where it ends up, with no cannon perks. Needs more than 10 HP. Then it needs 2 turns before it can be used again." },
+  { id: "hyped", type: "passive", passive: true, name: "Hyped", text: "Always on: every cannon and ball perk with a wait after use needs 1 turn less, so a 2-turn wait becomes 1." },
   { id: "secondchance", type: "passive", passive: true, name: "Second Chance", text: "Once: lets the piece fire its cannon two turns in a row, or roll into a ball two turns in a row. The perk is gone as soon as it's used." },
   { id: "indomitable", type: "fire", passive: true, cools: 2, name: "Indomitable Will", text: "Always on: a direct hit on a turn this piece fires its cannon does 49 damage instead of 50. Then it needs 2 turns before it can do that again." },
   { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: while the piece is moving, nothing but a cannon shell, a Self Destruct or the ice can hurt it. Then it needs 3 turns before it can be used again." },
@@ -2798,8 +2799,11 @@ function startBoard() {
   let orderLeg = "first";      /* which order the next click sets: "first", "second" or "decoy" */
   const hasPerk = (piece, id) => piece.perks.includes(id);
   const perkReady = (piece, id) => {
-    const cools = (PERKS.find((perk) => perk.id === id) || {}).cools;
-    return turnState.number > (piece.perkTurn[id] ?? -9) + (typeof cools === "number" ? cools : 1);
+    const perk = PERKS.find((x) => x.id === id) || {};
+    let wait = typeof perk.cools === "number" ? perk.cools : 1;
+    /* Hyped: cannon and ball perks wait one turn less */
+    if (typeof perk.cools === "number" && (perk.type === "fire" || perk.type === "ball") && piece.perks.includes("hyped")) wait -= 1;
+    return turnState.number > (piece.perkTurn[id] ?? -9) + wait;
   };
   const painReady = (piece) => hasPerk(piece, "pain") && piece.painTurn === turnState.number;
   const perkOn = (piece, id) => piece.perksOn.has(id) || (id === "tunnel" && piece.perks.includes("tunnel"));
