@@ -960,7 +960,7 @@ const PERK_TYPES = [
 const PERKS = [
   { id: "tunnel", type: "move", passive: true, name: "Tunneling", text: "Always on: any move into rock digs through it. Sent into a rock, the piece keeps digging until it comes out the other side. Nothing can hurt it while it's underground." },
   { id: "double", type: "move", name: "Double Move", text: "Two moves this turn, at twice the speed. Can't be used two turns in a row.", cools: true },
-  { id: "pierce", type: "fire", name: "Armor Piercing shell", text: "Hits only within 5 mm, but does 25 to a ball. Combines with Web and Big shell." },
+  { id: "pierce", type: "fire", name: "Armor Piercing shell", text: "Hits only within 5 mm, but does 30 to a ball, and still 30 with Big shell. Combines with Web and Big shell." },
   { id: "web", type: "fire", name: "Web", text: "The shell spins a web 30 mm wide (60 mm with Big shell) that stays for three turns. Anything entering it moves 20 mm at half speed on the following turn. On its own it does 50 on a direct hit, within 5 mm, and 10 within 10 mm; with Armor Piercing or Big shell it does theirs instead." },
   { id: "decoy", type: "move", name: "Decoy", text: "Send a fake copy on a second move. It lasts until next turn. With Barbed Wire or Rail Road on, it lays fake wire or track: real to everyone else, but harmless, and gone when anything touches it or next turn. Can't be used two turns in a row.", cools: true },
   { id: "railroad", type: "move", name: "Rail Road", text: "Lays track behind the piece as it moves, through its tunnels too. Any piece whose move lands on track can then ride anywhere on the joined-up railroad, at 30 mm/s, but can't stop on track inside rock. Can't be used two turns in a row.", cools: true },
@@ -981,9 +981,13 @@ const PERKS = [
   { id: "rolling", type: "ball", cools: 2, name: "Rolling Destruction", text: "Switch on, then roll into a ball: if an enemy shell or flame hits the ball this turn, it rolls 50 mm toward the piece that fired. Anything it rolls into takes 20 damage and is knocked 20 mm. Then it needs 2 turns before it can do that again." },
   { id: "igloo", type: "ball", cools: 2, name: "Igloo", text: "Switch on, then roll into a ball: if the ice catches it this turn, the ball rolls itself off the ice, unharmed. Then it needs 2 turns before it can do that again." },
   { id: "darkarts", type: "ball", cools: 2, name: "Dark Arts", text: "Switch on, then roll up on a fallen teammate's blood splatter to bring that piece back at 25 HP, with no perks. Then it needs 2 turns before it can do that again." },
-  { id: "pain", type: "ball", cools: 2, name: "Pain packet", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell. After those two shots it needs 2 turns before it can do that again." },
+  { id: "pain", type: "ball", cools: 2, name: "Pain packer", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell. After those two shots it needs 2 turns before it can do that again." },
   { id: "pushpull", type: "fire", cools: 2, name: "+/-", text: "Tap to switch it on as Push, tap again for Pull. Every piece the shell hurts is shoved 10 mm straight away from where it lands, or pulled 10 mm toward it; a piece rolled into a ball takes no damage but still moves 5 mm. Then it needs 2 turns before it can be used again." },
   { id: "doping", type: "move", cools: 2, name: "Doping", text: "Costs 10 HP. Give the piece a move, then aim its shot: it moves, then fires from where it ends up, with no cannon perks. Needs more than 10 HP. Then it needs 2 turns before it can be used again." },
+  { id: "secondchance", type: "passive", passive: true, name: "Second Chance", text: "Once: lets the piece fire its cannon two turns in a row, or roll into a ball two turns in a row. The perk is gone as soon as it's used." },
+  { id: "indomitable", type: "fire", passive: true, name: "Indomitable Will", text: "Always on: a direct hit on a turn this piece fires its cannon does 49 damage instead of 50." },
+  { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: that turn, nothing but a cannon shell or the ice can hurt the piece. Then it needs 3 turns before it can be used again." },
+  { id: "tamer", type: "fire", cools: 2, name: "Beetle Tamer", text: "If this turn's shell hits a beetle, you control that beetle next turn: pick it and send it charging, up to 45 mm. It won't ram your own pieces or hold a grudge for the shot. Then it needs 2 turns before it can be used again." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
 const BIG_RADIUS_MM = BLAST_RADIUS_MM * 2;
@@ -992,7 +996,7 @@ const DIRECT_HIT_MM = 5;             /* any shell landing this close kills a pie
 const DIRECT_HIT_DAMAGE = 50;
 const PIERCE_RADIUS_MM = 5;          /* the whole blast of an armor piercing shell */
 const PIERCE_DAMAGE = 50;            /* to anything inside it */
-const PIERCE_BALL_DAMAGE = 25;       /* to a piece rolled into a ball */
+const PIERCE_BALL_DAMAGE = 30;       /* to a piece rolled into a ball */
 
 /* What a shell does, from the shell perks that are on. They combine:
    Armor Piercing sets the blast to 5 mm, 50 damage, and 25 to a ball.
@@ -1009,7 +1013,7 @@ function shellBands(mods) {
       ? [{ within: PIERCE_RADIUS_MM, damage: PIERCE_DAMAGE, ball: PIERCE_BALL_DAMAGE }]
       : BLAST_DAMAGE.map((band) => ({ ...band, ball: 0 }));
     if (mods.big) {
-      bands = bands.map((band) => ({ within: band.within * 2, damage: Math.ceil(band.damage / 2), ball: Math.ceil(band.ball / 2) }));
+      bands = bands.map((band) => ({ within: band.within * 2, damage: Math.ceil(band.damage / 2), ball: mods.pierce ? band.ball : Math.ceil(band.ball / 2) }));
       if (!mods.pierce) bands[bands.length - 1].within -= BIG_OUTER_TRIM_MM;
     }
   }
@@ -2675,6 +2679,9 @@ function startBoard() {
   let net = null;               /* online: the connection and the turn's progress */
   const online = () => !!(net && net.inGame);
   const yours = () => pieces.filter((p) => p.team === localTeam && !p.decoy);
+  /* A beetle tamed by a side takes that side's orders for one turn. */
+  const tamedNow = (piece, team) => piece.team === BEETLE_TEAM && piece.tamedBy === team && piece.tamedTurn === turnState.number;
+  const commands = (piece) => piece.team === localTeam || tamedNow(piece, localTeam);
   const bots = () => pieces.filter((p) => !humanTeams.has(p.team) && !p.decoy && p.team !== BEETLE_TEAM);
   const beetles = () => pieces.filter((p) => p.team === BEETLE_TEAM);
   /* Every side is on its own: bots fight you and each other. */
@@ -2715,8 +2722,16 @@ function startBoard() {
   const bot = { ready: false, timer: null };
   /* Firing and rolling each sit out the turn after they are used. They are separate:
      firing doesn't stop a piece rolling next turn, or the other way round. */
-  const canFire = (piece) => turnState.number > piece.firedTurn + 1;
-  const canRoll = (piece) => turnState.number > piece.rolledTurn + 1;
+  const canFire = (piece) => piece.team !== BEETLE_TEAM && (turnState.number > piece.firedTurn + 1 || piece.perks.includes("secondchance"));
+  const canRoll = (piece) => piece.team !== BEETLE_TEAM && (turnState.number > piece.rolledTurn + 1 || piece.perks.includes("secondchance"));
+  /* Second Chance is spent the moment it lets a piece fire, or roll, two turns running. */
+  function secondChance(piece, last) {
+    if (last !== turnState.number - 1 || !piece.perks.includes("secondchance")) return;
+    piece.perks.splice(piece.perks.indexOf("secondchance"), 1);
+    floatLabel(piece, "Second Chance", "hit heal");
+  }
+  /* Unstoppable: switched on with this turn's move, only a shell or the ice can hurt it. */
+  const shielded = (piece) => piece.perks.includes("unstoppable") && piece.perkTurn.unstoppable === turnState.number;
   let youAreDone = false;
   let placementOver = false;
   let gameOver = false;
@@ -2743,7 +2758,7 @@ function startBoard() {
   const hasPerk = (piece, id) => piece.perks.includes(id);
   const perkReady = (piece, id) => {
     const cools = (PERKS.find((perk) => perk.id === id) || {}).cools;
-    return turnState.number > (piece.perkTurn[id] ?? -9) + (cools === 2 ? 2 : 1);
+    return turnState.number > (piece.perkTurn[id] ?? -9) + (typeof cools === "number" ? cools : 1);
   };
   const painReady = (piece) => hasPerk(piece, "pain") && piece.painTurn === turnState.number;
   const perkOn = (piece, id) => piece.perksOn.has(id) || (id === "tunnel" && piece.perks.includes("tunnel"));
@@ -2751,10 +2766,10 @@ function startBoard() {
   const aimingFlame = (piece) => !!piece && perkOn(piece, "flame") && action === "fire" && orderLeg === "first" && !(perkOn(piece, "doping") && piece.plan);
   const fireReach = (piece) => (aimingFlame(piece) ? FLAME_RANGE_MM : FIRE_RANGE_MM);
   const slowed = (piece) => turnState.number >= piece.slowFrom && turnState.number <= piece.slowTurn;
-  const moveReach = (piece) => (slowed(piece) ? WEB_MOVE_MM : MOVE_RANGE_MM);
+  const moveReach = (piece) => (piece.team === BEETLE_TEAM ? BEETLE_MOVE_MM : slowed(piece) ? WEB_MOVE_MM : MOVE_RANGE_MM);
   const crawlSpeed = (piece) => (piece.ride ? RAIL_SPEED_MM : CRAWL_SPEED_MM * (perkOn(piece, "double") ? 2 : 1) * (slowed(piece) ? 0.5 : 1) * (piece.team === BEETLE_TEAM ? BEETLE_SPEED : 1));
-  const shellMods = (piece) => (piece.plainShot ? { web: false, pierce: false, big: false, puddle: false, pushpull: null } : {
-    web: perkOn(piece, "web"), pierce: perkOn(piece, "pierce"), big: perkOn(piece, "big"), puddle: perkOn(piece, "puddle"),
+  const shellMods = (piece) => (piece.plainShot ? { web: false, pierce: false, big: false, puddle: false, pushpull: null, tamer: false } : {
+    web: perkOn(piece, "web"), pierce: perkOn(piece, "pierce"), big: perkOn(piece, "big"), puddle: perkOn(piece, "puddle"), tamer: perkOn(piece, "tamer"),
     pushpull: perkOn(piece, "pushpull") ? (piece.pushMode === "pull" ? "pull" : "push") : null,
   });
 
@@ -2909,7 +2924,7 @@ function startBoard() {
     if (action === "ball") return "This piece will roll into a ball. Pick Move or Fire cannon to change that, or click the piece to cancel.";
     const rolled = selected && selected.curl === 1 ? "This piece uncurls first. " : "";
     const medals = "";
-    const packed = selected && painReady(selected) ? "Pain packet: firing gives two shots this turn. " : "";
+    const packed = selected && painReady(selected) ? "Pain packer: firing gives two shots this turn. " : "";
     const webbed = selected && slowed(selected) ? `Caught in a web: ${WEB_MOVE_MM} mm at half speed this turn. ` : "";
     const order = medals + packed + webbed + (action === "fire"
       ? (aimingFlame(selected) ? "Click inside the red circle to aim the flame. Then you can pick a cannon shot too."
@@ -3061,7 +3076,7 @@ function startBoard() {
     removeMark(piece.flameMark);
     piece.flameMark = null;
     const target = piece.plan || piece.fire || piece.flameAt;
-    if (target && (piece.team === localTeam || moving)) {
+    if (target && (commands(piece) || moving)) {
       const r = radiusMm();
       const width = markWidthMm();
       piece.arrow = new THREE.Mesh(
@@ -3082,7 +3097,7 @@ function startBoard() {
       if (piece.plan && piece.plan2) extra(piece.plan, piece.plan2, arrowPaint[piece.team]);
       if (piece.plan && piece.fire) extra(piece.plan2 || piece.plan, piece.fire, blastPaint);   /* Doping: the shot after the move */
       /* An X where the move will run into rock and stop short. A digger goes through. */
-      if (piece.plan && piece.team === localTeam && !moving && !perkOn(piece, "tunnel")) {
+      if (piece.plan && commands(piece) && !moving && !perkOn(piece, "tunnel")) {
         const stop = rockStopOnPath(piece.up, piece.plan) || (piece.plan2 ? rockStopOnPath(piece.plan, piece.plan2) : null);
         if (stop) {
           const mark = blockedMark(stop);
@@ -4280,6 +4295,15 @@ function startBoard() {
     return { grudgeId, returning };
   }
 
+  /* Beetle Tamer: the beetle takes the shooter's side's orders next turn, and forgets the shot. */
+  function tameBeetle(beetle, shooter) {
+    beetle.tamedBy = shooter.team;
+    beetle.tamedTurn = turnState.number + 1;
+    beetle.grudgeId = null;
+    floatLabel(beetle, "Tamed", "hit heal");
+    if (shooter.team === localTeam) announce("Beetle tamed! Next turn, pick it and send it charging.");
+  }
+
   /* Beetle orders: chase whoever shot it, unless that leads more than 100 mm from home;
      else charge any piece within 50 mm; else wander its territory, heading home if it
      has strayed. Each charge carries on past the target, up to 45 mm. */
@@ -4291,7 +4315,15 @@ function startBoard() {
       return from.clone().applyAxisAngle(axis.normalize(), mm / r).normalize();
     };
     for (const beetle of beetles()) {
+      /* tamed: a player picks its move; for a bot side, it charges that side's nearest enemy */
+      if (beetle.tamedTurn === turnState.number && humanTeams.has(beetle.tamedBy)) continue;
       beetle.plan = beetle.plan2 = beetle.fire = beetle.fire2 = beetle.decoyPlan = null;
+      if (beetle.tamedTurn === turnState.number) {
+        const foe = pieces.filter((p) => p.team !== beetle.tamedBy && p.team !== BEETLE_TEAM && !p.decoy)
+          .sort((p, q) => mmBetween(p.up, beetle.up) - mmBetween(q.up, beetle.up))[0];
+        if (foe) beetle.plan = toward(beetle.up, foe.up, Math.min(BEETLE_MOVE_MM, mmBetween(beetle.up, foe.up) + 12));
+        continue;
+      }
       beetle.roll = false;
       beetle.perksOn.clear();
       const fromHome = mmBetween(beetle.up, beetle.home);
@@ -4460,6 +4492,7 @@ function startBoard() {
           if (hasPerk(piece, "pierce") && (nearest.hp <= 25 || Math.random() < 0.2)) piece.perksOn.add("pierce");
           if (hasPerk(piece, "big") && Math.random() < 0.3 && [landing, piece.fire2].every(wideSafe)) piece.perksOn.add("big");
           if (hasPerk(piece, "puddle") && Math.random() < (ice.rock ? 0.5 : 0.2)) piece.perksOn.add("puddle");
+          if (hasPerk(piece, "tamer") && perkReady(piece, "tamer") && nearest.team === BEETLE_TEAM) piece.perksOn.add("tamer");
           if (hasPerk(piece, "pushpull") && perkReady(piece, "pushpull") && Math.random() < 0.4) {
             piece.perksOn.add("pushpull");
             piece.pushMode = Math.random() < 0.5 ? "push" : "pull";
@@ -4618,6 +4651,7 @@ function startBoard() {
     }
     if (hasPerk(piece, "railroad") && perkReady(piece, "railroad") && Math.random() < 0.6) piece.perksOn.add("railroad");
     if (hasPerk(piece, "barbed") && perkReady(piece, "barbed") && Math.random() < 0.6) piece.perksOn.add("barbed");
+    if (hasPerk(piece, "unstoppable") && perkReady(piece, "unstoppable") && gap < 70 && Math.random() < 0.5) piece.perksOn.add("unstoppable");
     if (hasPerk(piece, "decoy") && perkReady(piece, "decoy") && Math.random() < 0.5) {
       piece.perksOn.add("decoy");
       piece.decoyPlan = spotToward(piece, heading, 6.28, reach * (0.6 + Math.random() * 0.4));
@@ -4799,9 +4833,9 @@ function startBoard() {
     }
     const piece = pieceAt(clientX, clientY);
     if (piece && devMode.checked && !online()) devPiece = piece.decoy ? null : piece;
-    if (piece && piece.team === BEETLE_TEAM) {
+    if (piece && piece.team === BEETLE_TEAM && !commands(piece)) {
       say(`That's a rhinoceros beetle, with ${piece.hp} of ${piece.maxHp} HP. It guards the hill around it and charges any piece that comes close, or that shoots it. Killing one earns ${BEETLE_BOUNTY} perks.`);
-    } else if (piece && piece.team !== localTeam) {
+    } else if (piece && !commands(piece)) {
       const owned = PERKS.filter((perk) => hasPerk(piece, perk.id)).map((perk) => perk.name);
       const medalCount = `${piece.medals} ${piece.medals === 1 ? "medal" : "medals"} of valor`;
       say(`That's one of ${teamName(piece.team)}'s pieces, with ${medalCount}.${owned.length ? ` Perks: ${owned.join(", ")}.` : ""} Click one of your own.`);
@@ -4977,6 +5011,10 @@ function startBoard() {
     for (const decoy of pieces.filter((p) => p.decoy)) removePiece(decoy);
     removeRailLines(rails.filter((line) => line.fake));
     for (const line of wires.filter((w) => w.fake)) removeWire(line);
+    for (const piece of pieces.filter((p) => p.plan && !p.decoy && perkOn(p, "unstoppable") && perkReady(p, "unstoppable"))) {
+      piece.perkTurn.unstoppable = turnState.number;
+      floatLabel(piece, "Unstoppable", "hit heal");
+    }
     burnPieces();
     for (const piece of pieces.filter((p) => p.plan && !p.decoy)) {
       for (const id of piece.perksOn) {
@@ -4996,6 +5034,7 @@ function startBoard() {
       showHealth(piece);
       floatLabel(piece, "Doping", "hit");
       piece.perkTurn.doping = turnState.number;
+      secondChance(piece, piece.firedTurn);
       piece.firedTurn = turnState.number;
       piece.dopeFire = true;
     }
@@ -5007,6 +5046,7 @@ function startBoard() {
     }
     for (const piece of gunners) {
       piece.shot = { stage: "aim", time: 0, glow: null };
+      secondChance(piece, piece.firedTurn);
       piece.firedTurn = turnState.number;
     }
     /* Rolling up lasts one turn. Unless ordered to roll again, a piece uncurls now. */
@@ -5018,6 +5058,7 @@ function startBoard() {
     for (const piece of pieces) {
       piece.curlGoal = piece.roll ? 1 : 0;
       if (piece.roll) {
+        secondChance(piece, piece.rolledTurn);
         piece.rolledTurn = turnState.number;
         piece.roll = false;
         drawArrow(piece);
@@ -5184,6 +5225,7 @@ function startBoard() {
     };
     shell.arc = shell.from.angleTo(shell.target);
     if (shell.mods.pushpull) piece.perkTurn.pushpull = turnState.number;
+    if (shell.mods.tamer) piece.perkTurn.tamer = turnState.number;
     piece.plainShot = false;
     shell.peak = SHELL_ARC * shell.arc;
     shell.life = (shell.arc * r) / SHELL_SPEED_MM + 0.35;
@@ -5418,6 +5460,10 @@ function startBoard() {
         vanish(piece);
         continue;
       }
+      if (shell.self && shielded(piece) && piece !== shell.shooter) {
+        showDamage(piece, 0);
+        continue;
+      }
       const ball = balled(piece);
       if (ball) packPain(piece, shell);
       if (ball && !shell.self) strikeBack(piece, shell.shooter);
@@ -5428,9 +5474,16 @@ function startBoard() {
         if (shell.mods.pushpull) nudge(piece, spot, 5, shell.mods.pushpull);
         continue;
       }
-      const damage = ball ? band.ball : band.damage;
+      let damage = ball ? band.ball : band.damage;
+      /* Indomitable Will: firing this turn, a direct hit leaves it at least 1 HP more */
+      if (!shell.self && damage >= DIRECT_HIT_DAMAGE && piece.perks.includes("indomitable") && piece.firedTurn === turnState.number) {
+        damage = DIRECT_HIT_DAMAGE - 1;
+        floatLabel(piece, "Indomitable Will", "hit heal");
+      }
       if (enemyOf(piece) && piece.team !== BEETLE_TEAM) hurtEnemy = true;
-      if (piece.team === BEETLE_TEAM && damage > 0 && !shell.self && shell.shooter.team !== BEETLE_TEAM) {
+      if (piece.team === BEETLE_TEAM && !shell.self && shell.mods.tamer && shell.shooter.team !== BEETLE_TEAM) {
+        tameBeetle(piece, shell.shooter);
+      } else if (piece.team === BEETLE_TEAM && damage > 0 && !shell.self && shell.shooter.team !== BEETLE_TEAM) {
         piece.grudgeId = shell.shooter.id;
         piece.returning = false;
       }
@@ -6586,6 +6639,10 @@ function startBoard() {
   /* Damage from something other than a blast. A kill of an enemy earns its source a
      perk, if that piece is still alive. */
   function hurt(piece, amount, source, byCannon = false) {
+    if (shielded(piece)) {
+      showDamage(piece, 0);
+      return;
+    }
     piece.hp = Math.max(0, piece.hp - amount);
     turnState.hits++;
     showDamage(piece, amount);
@@ -6858,8 +6915,8 @@ function startBoard() {
     if (!perkOn(piece, "pain") || piece.team === shell.shooter.team) return;
     piece.painTurn = turnState.number + 1;
     piece.perkTurn.pain = piece.painTurn;   /* the 2-turn wait starts with the two shots */
-    floatLabel(piece, "Pain packet", "hit");
-    if (piece.team === localTeam) announce(`Pain packet! ${piece.record ? piece.record.name : "Your piece"} can fire two shots next turn.`);
+    floatLabel(piece, "Pain packer", "hit");
+    if (piece.team === localTeam) announce(`Pain packer! ${piece.record ? piece.record.name : "Your piece"} can fire two shots next turn.`);
   }
 
   function spinWeb(spot, shell) {
@@ -6917,6 +6974,10 @@ function startBoard() {
     if (balled(target)) {
       showDamage(target, 0);
       if (enemies && !target.decoy) awardMedal(target);
+      return;
+    }
+    if (shielded(target)) {
+      showDamage(target, 0);
       return;
     }
     if (enemies && !target.decoy && target.team !== BEETLE_TEAM) awardMedal(attacker);
@@ -7140,7 +7201,7 @@ function startBoard() {
           /* A charging beetle doesn't stop: it rams what it runs into, once each. */
           const ram = charging(a) ? a : b;
           const other = ram === a ? b : a;
-          if (other.team !== BEETLE_TEAM && !(ram.rammed || (ram.rammed = new Set())).has(other)) {
+          if (other.team !== BEETLE_TEAM && !tamedNow(ram, other.team) && !(ram.rammed || (ram.rammed = new Set())).has(other)) {
             ram.rammed.add(other);
             rams.push([ram, other]);
           }
@@ -7267,6 +7328,10 @@ function startBoard() {
       showDamage(target, 0);
       return;
     }
+    if (shielded(target)) {
+      showDamage(target, 0);
+      return;
+    }
     target.hp = Math.max(0, target.hp - BEETLE_DAMAGE);
     turnState.hits++;
     showDamage(target, BEETLE_DAMAGE);
@@ -7293,6 +7358,10 @@ function startBoard() {
     if (balled(target)) {
       showDamage(target, 0);
       if (enemies) awardMedal(target);
+      return;
+    }
+    if (shielded(target)) {
+      showDamage(target, 0);
       return;
     }
     if (enemies && target.team !== BEETLE_TEAM) awardMedal(roller);
@@ -8214,7 +8283,7 @@ function startBoard() {
         if (!team || data.turn !== turnState.number) return;
         for (const order of data.orders) {
           const piece = pieces.find((q) => q.id === order.id);
-          if (piece && piece.team === team) net.orders.set(order.id, order);
+          if (piece && (piece.team === team || tamedNow(piece, team))) net.orders.set(order.id, order);
         }
         net.done.add(team);
         shareProgress();
@@ -8358,7 +8427,7 @@ function startBoard() {
   }
 
   function sendOrders() {
-    const orders = yours().map((piece) => ({ id: piece.id, ...packOrders(piece) }));
+    const orders = [...yours(), ...beetles().filter(commands)].map((piece) => ({ id: piece.id, ...packOrders(piece) }));
     if (net.host) {
       for (const order of orders) net.orders.set(order.id, order);
       net.done.add(localTeam);
@@ -8387,7 +8456,7 @@ function startBoard() {
     const orders = [];
     for (const piece of pieces) {
       if (piece.decoy) continue;
-      const order = humanTeams.has(piece.team) ? net.orders.get(piece.id) : { id: piece.id, ...packOrders(piece) };
+      const order = humanTeams.has(piece.team) || (piece.team === BEETLE_TEAM && humanTeams.has(piece.tamedBy) && piece.tamedTurn === turnState.number) ? net.orders.get(piece.id) : { id: piece.id, ...packOrders(piece) };
       if (order) orders.push(order);
     }
     toOthers({ t: "go", turn: turnState.number, orders });
