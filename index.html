@@ -4627,7 +4627,13 @@ function startBoard() {
     const [shortest, longest] = BOT_THINK_MS;
     bot.timer = setTimeout(() => {
       bot.timer = null;
-      chooseBotMoves();
+      /* A slip in the bots' thinking must never hold up the game: they go with what they have. */
+      try {
+        chooseBotMoves();
+      } catch (err) {
+        console.error("Bot thinking failed; the bots keep the orders they have.", err);
+        announce(`The bots hit a snag choosing their orders and go with what they have. (${String(err && err.message || err).slice(0, 120)})`);
+      }
       bot.ready = true;
       if (online()) net.botsReady();
       else if (youAreDone || !yours().length) beginMoves();
