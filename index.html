@@ -1027,7 +1027,7 @@ const PERKS = [
   { id: "pain", type: "ball", cools: 2, name: "Pain packer", text: "Switch on, then roll into a ball: if an enemy shell hits it this turn, it fires two shots next turn, 1 second apart. Works with Web, Armor Piercing and Big shell. After those two shots it needs 2 turns before it can do that again." },
   { id: "pushpull", type: "fire", cools: 2, name: "+/-", text: "Tap to switch it on as Push, tap again for Pull. Every piece the shell hurts is shoved 10 mm straight away from where it lands, or pulled 10 mm toward it; a piece rolled into a ball takes no damage but still moves 5 mm. Then it needs 2 turns before it can be used again." },
   { id: "doping", type: "move", cools: 2, name: "Doping", text: "Costs 10 HP. Give the piece a move, then aim its shot: it moves, then fires from where it ends up, with no cannon perks. Needs more than 10 HP. Then it needs 2 turns before it can be used again." },
-  { id: "hyped", type: "passive", passive: true, name: "Hyped", text: "Always on: every cannon and ball perk with a wait after use needs 1 turn less, so a 2-turn wait becomes 1." },
+  { id: "hyped", type: "passive", passive: true, name: "Hyped", text: "Always on: every cannon and ball perk with a wait after use needs 1 turn less, so a 2-turn wait becomes 1. And each move perk can be used two turns in a row before its wait starts." },
   { id: "secondchance", type: "passive", passive: true, name: "Second Chance", text: "Once: lets the piece fire its cannon two turns in a row, or roll into a ball two turns in a row. The perk is gone as soon as it's used." },
   { id: "indomitable", type: "fire", passive: true, cools: 2, name: "Indomitable Will", text: "Always on: a direct hit on a turn this piece fires its cannon does 49 damage instead of 50. Then it needs 2 turns before it can do that again." },
   { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: while the piece is moving, nothing but a cannon shell, a Self Destruct or the ice can hurt it. Then it needs 3 turns before it can be used again." },
@@ -2848,13 +2848,22 @@ function startBoard() {
   let moving = false;
   let orderLeg = "first";      /* which order the next click sets: "first", "second" or "decoy" */
   const hasPerk = (piece, id) => piece.perks.includes(id);
+  /* A perk used this turn: its wait starts, and a run of turns in a row is counted. */
+  const usePerk = (piece, id) => {
+    const run = piece.perkRun || (piece.perkRun = {});
+    run[id] = piece.perkTurn[id] === turnState.number - 1 ? (run[id] || 1) + 1 : 1;
+    piece.perkTurn[id] = turnState.number;
+  };
   const perkReady = (piece, id) => {
     const perk = PERKS.find((x) => x.id === id) || {};
     if (!perk.passive && emped(piece)) return false;
     let wait = typeof perk.cools === "number" ? perk.cools : 1;
     /* Hyped: cannon and ball perks wait one turn less */
     if (typeof perk.cools === "number" && (perk.type === "fire" || perk.type === "ball") && piece.perks.includes("hyped")) wait -= 1;
-    return turnState.number > (piece.perkTurn[id] ?? -9) + wait;
+    const last = piece.perkTurn[id] ?? -9;
+    if (turnState.number > last + wait) return true;
+    /* Hyped: a move perk used last turn, just once, can go again before its wait starts */
+    return perk.type === "move" && piece.perks.includes("hyped") && last === turnState.number - 1 && ((piece.perkRun || {})[id] || 1) < 2;
   };
   const painReady = (piece) => hasPerk(piece, "pain") && piece.painTurn === turnState.number;
   const perkOn = (piece, id) => piece.perksOn.has(id) || (id === "tunnel" && piece.perks.includes("tunnel"));
@@ -5253,7 +5262,7 @@ function startBoard() {
       piece.fire = piece.fire2 = piece.flameAt = null;
     }
     for (const piece of pieces.filter((p) => p.plan && !p.decoy && perkOn(p, "unstoppable") && perkReady(p, "unstoppable"))) {
-      piece.perkTurn.unstoppable = turnState.number;
+      usePerk(piece, "unstoppable");
       floatLabel(piece, "Unstoppable", "hit heal");
     }
     moveSlice = 0;
@@ -5261,7 +5270,7 @@ function startBoard() {
     burnPieces();
     for (const piece of pieces.filter((p) => p.plan && !p.decoy)) {
       for (const id of piece.perksOn) {
-        if (PERKS.find((perk) => perk.id === id).cools === true) piece.perkTurn[id] = turnState.number;
+        if (PERKS.find((perk) => perk.id === id).cools === true) usePerk(piece, id);
       }
     }
     for (const piece of pieces.filter((p) => p.decoyPlan)) sendDecoy(piece);
@@ -5276,7 +5285,7 @@ function startBoard() {
       showDamage(piece, 10);
       showHealth(piece);
       floatLabel(piece, "Doping", "hit");
-      piece.perkTurn.doping = turnState.number;
+      usePerk(piece, "doping");
       secondChance(piece, piece.firedTurn);
       piece.firedTurn = turnState.number;
       piece.dopeFire = true;
