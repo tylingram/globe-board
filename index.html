@@ -1464,6 +1464,37 @@ function poseCrawl(piece, strength) {
   const body = piece.mesh.children[0];
   body.position.y = piece.bodyHeight + 0.007 * Math.sin(turn * 2) * strength;
   body.rotation.y = 0.05 * Math.sin(turn) * strength;
+  poseRoll(piece);
+}
+
+/* A ball that rolls across the ground spins as it goes. The spin is kept in the piece's
+   own frame and turns the body about the ball's centre; it fades out as the piece
+   uncurls, so the piece always unrolls the right way up. */
+const BALL_CENTER = 0.33;   /* the ball's centre above the body's base, in model units */
+function poseRoll(piece) {
+  if (!piece.rollQ) return;
+  const body = piece.mesh.children[0];
+  const t = piece.curl;
+  const eased = t * t * (3 - 2 * t);
+  const turn = new THREE.Quaternion().slerp(piece.rollQ, eased);
+  const lift = BALL_CENTER * body.scale.y;
+  body.quaternion.copy(turn);
+  body.position.set(0, piece.bodyHeight + lift, piece.bodyDepth).add(new THREE.Vector3(0, -lift, 0).applyQuaternion(turn));
+  if (t === 0) {
+    piece.rollQ = null;
+    body.quaternion.identity();
+    body.position.set(0, piece.bodyHeight, piece.bodyDepth);
+  }
+}
+/* Spin a ball for a roll of `mm` about the globe axis it is travelling round. */
+function spinBall(piece, axis, mm) {
+  if (piece.team === "beetle" || mm <= 0) return;
+  const body = piece.mesh.children[0];
+  const radius = BALL_CENTER * body.scale.y * PIECE_LENGTH_MM * (piece.size || 1);
+  const local = axis.clone().applyQuaternion(piece.mesh.quaternion.clone().invert()).normalize();
+  const step = new THREE.Quaternion().setFromAxisAngle(local, mm / radius);
+  piece.rollQ = step.multiply(piece.rollQ || new THREE.Quaternion());
+  poseRoll(piece);
 }
 
 /* Sets a piece partway between normal (0) and fully rolled up (1). */
@@ -1482,6 +1513,7 @@ function poseCurl(piece) {
     1
   );
   piece.tag.classList.toggle("shielded", piece.curl === 1);
+  poseRoll(piece);
 }
 
 /* Shortest distance between two line segments, from p1 to q1 and from p2 to q2. */
@@ -6005,8 +6037,9 @@ function startBoard() {
     piece.forward.applyAxisAngle(piece.igloo.axis, distance / radiusMm());
     piece.forward.addScaledVector(piece.up, -piece.forward.dot(piece.up)).normalize();
     piece.igloo.left -= distance;
-    if (piece.igloo.left <= 1e-9) piece.igloo = null;
     poseOnSphere(piece);
+    spinBall(piece, piece.igloo.axis, distance);
+    if (piece.igloo.left <= 1e-9) piece.igloo = null;
   }
 
   /* A frozen piece stays where it was caught, turned to ice. Being rolled up doesn't help. */
@@ -7535,8 +7568,9 @@ function startBoard() {
     piece.forward.applyAxisAngle(piece.tumble.axis, angle);
     piece.forward.addScaledVector(piece.up, -piece.forward.dot(piece.up)).normalize();
     piece.tumble.left -= distance;
-    if (piece.tumble.left <= 1e-9) piece.tumble = null;
     poseOnSphere(piece);
+    spinBall(piece, piece.tumble.axis, distance);
+    if (piece.tumble.left <= 1e-9) piece.tumble = null;
   }
 
   /* Rolling Destruction: a ball rolled up with it switched on, hit by an enemy shell or
@@ -8264,7 +8298,7 @@ function startBoard() {
   /* What isn't game state: meshes and labels, the motion of a turn in progress, and
      links to other things, which are sent as ids instead. */
   const PIECE_SKIP = new Set(["mesh", "tag", "arrow", "aimMark", "aimMark2", "extraArrows", "legs", "antennae", "curlParts",
-    "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "sparkFx", "emp", "flameMark",
+    "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "sparkFx", "emp", "rollQ", "flameMark",
     "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt", "turnOverlap", "dopeFire", "plainShot", "rammed", "hatMesh", "stopSlice"]);
   function packPiece(piece) {
     const out = {};
