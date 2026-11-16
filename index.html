@@ -310,6 +310,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
 }
 .hp[hidden] { display: none; }
 .hp.perked { border-color: #e3b341; }
+.hp.hearted::before { content: "\2665\00a0"; color: #ff4f8b; }
 .hp.shielded { border-color: var(--shield); box-shadow: 0 0 0 1px var(--shield); }
 .hp i { position: absolute; inset: 0 auto 0 0; }
 .hp b {
@@ -1154,6 +1155,7 @@ const PERKS = [
   { id: "tamer", type: "fire", cools: 2, name: "Beetle Tamer", text: "If this turn's shell hits a beetle, you control that beetle next turn: pick it and send it charging, up to 45 mm. It won't ram your own pieces or hold a grudge for the shot. Then it needs 2 turns before it can be used again." },
   { id: "emp", type: "ball", cools: 2, name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work. Then it needs 2 turns before it can be used again." },
   { id: "punch", type: "fire", special: true, cools: 2, name: "One Punch", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then aim inside the red circle. Instead of a shell, the piece throws a blade of white light 100 mm long and 7\u00b0 wide, like the flame's slice. Anything within 1 mm of its middle line takes 50 damage; anything else it touches takes 45 and is thrown 30 mm back. A ball takes no damage, but is pushed 20 mm. Rail road, barbed wire, rock, cliffs, plants, webs, puddles and mushrooms in the slice are erased, and the ground there is cut down to 5 mm below the base line, its sides sloping up 1 mm for every 3 mm, like any hillside. Then it needs 2 turns before it can be used again." },
+  { id: "heart", type: "fire", special: true, cools: 2, name: "Shared Heart", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on and fire: the piece nearest the blast that the shell hurts, yours or an enemy's, shares this piece's heart (shown with \u2665). From then on, half of any damage this piece takes (rounded down) goes to that piece instead. It can't be used again until that piece dies, and needs 2 turns after it's used." },
   { id: "divine", type: "fire", special: true, cools: 2, name: "Divine Destruction", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. The cannon fires as usual, and leaves a glowing circle where the shell lands and another straight through the globe from there. Next turn, 2 seconds in, a white laser drives through both circles and the whole globe between. The laser is as wide as the shell's whole damage area (40 mm across for a plain shell, wider with Big shell, narrower with Armor Piercing). Every piece in it, balls and diggers too, is erased, and it leaves a hole that wide that nothing can cross, not even by tunneling. Then it needs 2 turns before it can be used again." },
   { id: "tectonic", type: "ball", special: true, cools: 2, name: "Tectonic Shift", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a circle of ground 50 mm across, round it, becomes a turntable and turns half way round over 2 seconds as the turn plays. Everything on it turns with it: hills, rock and cliffs, track, wire, webs, puddles and plants. Every piece on it, from any side, is carried round, and its orders turn with it: a move or a shot goes the same distance and direction from the piece as it was ordered, so it ends up somewhere else on the map. When it stops, the ground along its edge evens out so no slope is steeper than 1 mm in 3. A piece that drives off stops turning; one that drives on starts. Track and wire are cut where they cross its edge, and so is rock, except the frozen rock. The ice and anything frozen stay where they are, and the ice spreads as usual. Then it needs 2 turns before it can be used again." },
   { id: "arena", type: "ball", special: true, cools: 2, name: "Tournament Arc", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a ring of cliff 5 mm wide rises 60 mm out from the piece, and stays for the rest of the game. Anything standing where it rises is pushed off it, unhurt. From next turn on, this piece and any teammates inside the ring have Melee, Tunneling and Double Move, with no wait between uses. A piece that didn't have them loses them again once it's outside the ring. Then it needs 2 turns before it can be used again." },
@@ -3030,6 +3032,7 @@ function startBoard() {
     const perk = PERKS.find((x) => x.id === id) || {};
     if (!perk.passive && emped(piece)) return false;
     if (ARENA_PERKS.includes(id) && inArena(piece)) return true;   /* Tournament Arc: no wait inside the ring */
+    if (id === "heart" && heartOf(piece)) return false;            /* Shared Heart: not while that piece lives */
     let wait = typeof perk.cools === "number" ? perk.cools : 1;
     /* Hyped: cannon and ball perks wait one turn less */
     if (typeof perk.cools === "number" && (perk.type === "fire" || perk.type === "ball") && piece.perks.includes("hyped")) wait -= 1;
@@ -3052,6 +3055,7 @@ function startBoard() {
   const shellMods = (piece) => (piece.plainShot ? { web: false, pierce: false, big: false, puddle: false, pushpull: null, tamer: false } : {
     web: perkOn(piece, "web"), pierce: perkOn(piece, "pierce"), big: perkOn(piece, "big"), puddle: perkOn(piece, "puddle"), tamer: perkOn(piece, "tamer"),
     divine: perkOn(piece, "divine") && perkReady(piece, "divine"),
+    heart: perkOn(piece, "heart") && perkReady(piece, "heart"),
     pushpull: perkOn(piece, "pushpull") ? (piece.pushMode === "pull" ? "pull" : "push") : null,
   });
 
@@ -4538,6 +4542,7 @@ function startBoard() {
   }
 
   function updateMarks() {
+    drawHearts();
     for (const piece of pieces) {
       /* Offset on screen rather than in 3D, so the tag clears a piece seen from above. */
       const spot = onStage(piece.mesh.position, true);
@@ -5043,6 +5048,7 @@ function startBoard() {
           /* Divine Destruction, where it won't catch its own side next turn */
           const laserSafe = !pieces.some((p) => p.team === piece.team && !p.decoy && [landing, landing.clone().negate()].some((end) => mmBetween(p.up, end) <= divineRadius(shellMods(piece)) + 30));
           if (hasPerk(piece, "divine") && perkReady(piece, "divine") && laserSafe && Math.random() < 0.5) piece.perksOn.add("divine");
+          if (hasPerk(piece, "heart") && perkReady(piece, "heart") && Math.random() < 0.6) piece.perksOn.add("heart");
           if (hasPerk(piece, "pushpull") && perkReady(piece, "pushpull") && Math.random() < 0.4) {
             piece.perksOn.add("pushpull");
             piece.pushMode = Math.random() < 0.5 ? "push" : "pull";
@@ -5885,6 +5891,7 @@ function startBoard() {
     if (shell.mods.pushpull) piece.perkTurn.pushpull = turnState.number;
     if (shell.mods.tamer) piece.perkTurn.tamer = turnState.number;
     if (shell.mods.divine) usePerk(piece, "divine");
+    if (shell.mods.heart) usePerk(piece, "heart");
     piece.plainShot = false;
     shell.peak = SHELL_ARC * shell.arc;
     shell.life = (shell.arc * r) / SHELL_SPEED_MM + 0.35;
@@ -6111,7 +6118,9 @@ function startBoard() {
     let hurtEnemy = false;
     addBlast(spot, bands[bands.length - 1].within, 0.8, true);
     sound.explosion(bands[bands.length - 1].within / 40, !!shell.mods.web && !shell.mods.pierce && !shell.mods.big && !shell.self);
+    let heartPick = null;   /* Shared Heart: the hurt piece nearest the blast */
     for (const piece of [...pieces]) {
+      if (!pieces.includes(piece)) continue;   /* gone this instant, maybe by a shared heart */
       const distance = blastDistance(spot, piece);
       const band = bands.find((b) => distance <= b.within);
       if (!band) continue;
@@ -6145,6 +6154,8 @@ function startBoard() {
         piece.grudgeId = shell.shooter.id;
         piece.returning = false;
       }
+      if (shell.mods.heart && !shell.self && piece !== shell.shooter && damage > 0 && (!heartPick || distance < heartPick.distance)) heartPick = { piece, distance };
+      damage = shareDamage(piece, damage, shell.self ? null : shell.shooter);
       piece.hp = Math.max(0, piece.hp - damage);
       turnState.hits++;
       showDamage(piece, damage);
@@ -6161,6 +6172,7 @@ function startBoard() {
       }
     }
     if (hurtEnemy && !shell.self) awardMedal(shell.shooter);   /* one per shell, however many it hurt */
+    if (heartPick && pieces.includes(heartPick.piece) && pieces.includes(shell.shooter)) shareHeart(shell.shooter, heartPick.piece);
     say(pieceNote.textContent);
   }
 
@@ -6382,6 +6394,7 @@ function startBoard() {
     let rolling = false;
     const caught = pieces.filter((p) => !p.digging && onIce(p)).sort((a, b) => iceDistance(a.up) - iceDistance(b.up));
     for (const piece of caught) {
+      if (!pieces.includes(piece)) continue;
       if (piece.decoy) {
         vanish(piece);
         continue;
@@ -6402,7 +6415,7 @@ function startBoard() {
          that leaves it at 0. */
       if (piece.iceTurn === turnState.number) continue;
       piece.iceTurn = turnState.number;
-      const bite = hasPerk(piece, "icecold") ? ICE_COLD_DAMAGE : ICE_DAMAGE;
+      const bite = shareDamage(piece, hasPerk(piece, "icecold") ? ICE_COLD_DAMAGE : ICE_DAMAGE, null);
       if (piece.hp > bite) {
         piece.hp -= bite;
         turnState.hits++;
@@ -7027,7 +7040,7 @@ function startBoard() {
         continue;
       }
       for (const piece of [...pieces]) {
-        if (piece.wireLine === line || piece.digging) continue;
+        if (piece.wireLine === line || piece.digging || !pieces.includes(piece)) continue;
         /* Your own side's wire never snags you. */
         if (piece.team === line.owner.team) continue;
         if (line.hitBy.get(piece) === turnState.number) continue;
@@ -7244,7 +7257,7 @@ function startBoard() {
       flame.mesh.material.uniforms.uGrow.value = flame.reach / FLAME_RANGE_MM + 0.02;
       moveEmbers(flame);
       for (const piece of [...pieces]) {
-        if (flame.caught.has(piece) || piece.digging || !inFlame(flame, piece)) continue;
+        if (flame.caught.has(piece) || piece.digging || !pieces.includes(piece) || !inFlame(flame, piece)) continue;
         flame.caught.add(piece);
         if (piece.decoy) {
           vanish(piece);
@@ -7331,7 +7344,7 @@ function startBoard() {
   /* The burn left over from last turn's flames, as this turn starts playing. */
   function burnPieces() {
     for (const piece of [...pieces]) {
-      if (piece.decoy || !piece.burnLeft || turnState.number < piece.burnNext) continue;
+      if (piece.decoy || !piece.burnLeft || turnState.number < piece.burnNext || !pieces.includes(piece)) continue;
       piece.burnLeft--;
       piece.burnNext = turnState.number + 1;
       if (!piece.burnLeft) setOnFire(piece, false);
@@ -7343,10 +7356,12 @@ function startBoard() {
   /* Damage from something other than a blast. A kill of an enemy earns its source a
      perk, if that piece is still alive. */
   function hurt(piece, amount, source, byCannon = false) {
+    if (!pieces.includes(piece)) return;   /* already gone this instant, maybe by a shared heart */
     if (shielded(piece)) {
       showDamage(piece, 0);
       return;
     }
+    amount = shareDamage(piece, amount, source);
     piece.hp = Math.max(0, piece.hp - amount);
     turnState.hits++;
     showDamage(piece, amount);
@@ -7702,9 +7717,10 @@ function startBoard() {
       return;
     }
     if (enemies && !target.decoy && target.team !== BEETLE_TEAM) awardMedal(attacker);
-    target.hp = Math.max(0, target.hp - MELEE_DAMAGE);
+    const meleeTaken = shareDamage(target, MELEE_DAMAGE, attacker);
+    target.hp = Math.max(0, target.hp - meleeTaken);
     turnState.hits++;
-    showDamage(target, MELEE_DAMAGE);
+    showDamage(target, meleeTaken);
     showHealth(target);
     if (target.hp === 0) {
       turnState.kills++;
@@ -8063,9 +8079,10 @@ function startBoard() {
       showDamage(target, 0);
       return;
     }
-    target.hp = Math.max(0, target.hp - BEETLE_DAMAGE);
+    const beetleTaken = shareDamage(target, BEETLE_DAMAGE, beetle);
+    target.hp = Math.max(0, target.hp - beetleTaken);
     turnState.hits++;
-    showDamage(target, BEETLE_DAMAGE);
+    showDamage(target, beetleTaken);
     showHealth(target);
     if (target.hp === 0) {
       turnState.kills++;
@@ -8096,9 +8113,10 @@ function startBoard() {
       return;
     }
     if (enemies && target.team !== BEETLE_TEAM) awardMedal(roller);
-    target.hp = Math.max(0, target.hp - TUMBLE_DAMAGE);
+    const tumbleTaken = shareDamage(target, TUMBLE_DAMAGE, roller);
+    target.hp = Math.max(0, target.hp - tumbleTaken);
     turnState.hits++;
-    showDamage(target, TUMBLE_DAMAGE);
+    showDamage(target, tumbleTaken);
     showHealth(target);
     if (target.hp === 0) {
       turnState.kills++;
@@ -8278,6 +8296,67 @@ function startBoard() {
       button.append(title, about);
       perkList.appendChild(button);
     }
+  }
+
+  /* ---------- Shared Heart ---------- */
+  /* A piece's shared heart is kept as the other piece's id, so it packs for online play
+     as it is. It ends when that piece dies. */
+  const heartOf = (piece) => (piece.heartId != null ? pieces.find((p) => p.id === piece.heartId && !p.decoy && p !== piece) || null : null);
+  function shareHeart(piece, other) {
+    piece.heartId = other.id;
+    floatLabel(piece, "Shared Heart", "hit heal");
+    floatLabel(other, "\u2665 Shared Heart", "hit");
+    const owner = possessive(piece.team);
+    announce(other.team === piece.team ? `${owner} piece shares its heart with a teammate: half the damage it takes goes to that piece.`
+      : `${owner} piece shares its heart with ${possessive(other.team).toLowerCase()} piece: half the damage it takes goes there.`, other.up);
+  }
+  /* Half of the damage (rounded down) goes to the piece with the shared heart, hurt as if
+     by the same source. Returns what the piece takes itself. */
+  function shareDamage(piece, amount, source) {
+    const other = heartOf(piece);
+    const passed = other ? Math.floor(amount / 2) : 0;
+    if (!passed) return amount;
+    floatLabel(other, "\u2665", "hit");
+    hurt(other, passed, source && source !== other ? source : null);
+    return amount - passed;
+  }
+  /* A pink line between each piece and the one it shares its heart with, and a heart on
+     both their tags. Redrawn with the tags. */
+  const heartPaint = new THREE.LineBasicMaterial({ color: linear("#ff4f8b"), transparent: true, opacity: 0.85, depthWrite: false });
+  const heartLine = new THREE.LineSegments(new THREE.BufferGeometry(), heartPaint);
+  heartLine.frustumCulled = false;
+  globe.add(heartLine);
+  let heartKey = "";
+  function drawHearts() {
+    const pairs = [];
+    for (const piece of pieces) {
+      const other = heartOf(piece);
+      if (other) pairs.push([piece, other]);
+    }
+    const hearted = new Set(pairs.flat());
+    for (const piece of pieces) piece.tag.classList.toggle("hearted", hearted.has(piece));
+    const key = pairs.map(([a, b]) => a.mesh.position.toArray().concat(b.mesh.position.toArray()).map((n) => n.toFixed(4)).join()).join("|");
+    if (key === heartKey) return;
+    heartKey = key;
+    const positions = [];
+    const r = radiusMm();
+    for (const [a, b] of pairs) {
+      const from = a.mesh.position, to = b.mesh.position;
+      const steps = 24;
+      let last = null;
+      for (let i = 0; i <= steps; i++) {
+        /* an arch between the two, rising a little in the middle */
+        const point = from.clone().lerp(to, i / steps);
+        const length = from.length() + (to.length() - from.length()) * (i / steps);
+        point.setLength(length + (Math.sin((Math.PI * i) / steps) * Math.max(4, a.up.angleTo(b.up) * r * 0.15) + 3) / r);
+        if (last) positions.push(last.x, last.y, last.z, point.x, point.y, point.z);
+        last = point;
+      }
+    }
+    heartLine.geometry.dispose();
+    heartLine.geometry = new THREE.BufferGeometry();
+    heartLine.geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    needsDraw = true;
   }
 
   /* ---------- Tectonic Shift ---------- */
@@ -9077,7 +9156,7 @@ function startBoard() {
   function zapDashes() {
     for (const dash of dashes) {
       for (const piece of [...pieces]) {
-        if (piece.team === dash.ownerTeam || piece.digging || dash.hit.has(piece)) continue;
+        if (piece.team === dash.ownerTeam || piece.digging || dash.hit.has(piece) || !pieces.includes(piece)) continue;
         if (wireGap(piece, dash) > 0) continue;
         dash.hit.add(piece);
         if (piece.decoy) {
