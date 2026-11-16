@@ -810,16 +810,35 @@ function plainHeightAt(features, waves, x, y, z, radiusMm) {
    is the ground that was at the turned-back spot. `plain` is the plain height here. */
 function layeredHeight(features, waves, x, y, z, radiusMm, count, plain) {
   const bends = features.bends || [];
+  const before = (v, upTo) => layeredHeight(features, waves, v.x, v.y, v.z, radiusMm, upTo, plainHeightAt(features, waves, v.x, v.y, v.z, radiusMm));
   for (let i = count - 1; i >= 0; i--) {
     const warp = bends[i].quake;
     if (!warp || warp.kind !== "warp" || !warp.angle) continue;
     const c = warp.at.x * x + warp.at.y * y + warp.at.z * z;
-    if (Math.acos(Math.max(-1, Math.min(1, c))) * radiusMm > warp.radius) continue;
-    const q = new THREE.Vector3(x, y, z).applyAxisAngle(warp.at, -warp.angle);
-    const below = layeredHeight(features, waves, q.x, q.y, q.z, radiusMm, i, plainHeightAt(features, waves, q.x, q.y, q.z, radiusMm));
-    return bentHeight(bends, x, y, z, radiusMm, below, i + 1, count);
+    const d = Math.acos(Math.max(-1, Math.min(1, c))) * radiusMm;
+    /* Once it has stopped, the step at its edge evens out: no slope steeper than 1 in 3. */
+    const settled = warp.angle >= Math.PI - 1e-6;
+    if (d > warp.radius && (!settled || d > warp.radius + TECTONIC_GRADE_MM)) continue;
+    const here = new THREE.Vector3(x, y, z);
+    let height;
+    if (d <= warp.radius) {
+      height = before(here.clone().applyAxisAngle(warp.at, -warp.angle), i);
+      if (settled) height = Math.min(height, before(turntableEdge(warp, here, radiusMm), i) + (warp.radius - d) * TERRAIN_STEEP);
+    } else {
+      const edge = turntableEdge(warp, here, radiusMm).applyAxisAngle(warp.at, -warp.angle);
+      height = Math.min(layeredHeight(features, waves, x, y, z, radiusMm, i, plain), before(edge, i) + (d - warp.radius) * TERRAIN_STEEP);
+    }
+    return bentHeight(bends, x, y, z, radiusMm, height, i + 1, count);
   }
   return bentHeight(bends, x, y, z, radiusMm, plain, 0, count);
+}
+/* The nearest point on a turntable's edge to a spot (unit vectors). */
+function turntableEdge(warp, v, radiusMm) {
+  let out = v.clone().addScaledVector(warp.at, -v.dot(warp.at));
+  if (out.lengthSq() < 1e-14) out = new THREE.Vector3(1, 0, 0).cross(warp.at).lengthSq() > 1e-6 ? new THREE.Vector3(1, 0, 0).cross(warp.at) : new THREE.Vector3(0, 1, 0).cross(warp.at);
+  out.normalize();
+  const angle = warp.radius / radiusMm;
+  return warp.at.clone().multiplyScalar(Math.cos(angle)).addScaledVector(out, Math.sin(angle));
 }
 /* One Punch: inside its slice the ground is cut down to 5 mm below the base line. Its
    sides slope up 1 mm in 3 to the ground around it, like any slope. Deeper valleys stay. */
@@ -1024,6 +1043,7 @@ const DASH_KNOCK_MM = 10;
 const DASH_HOLD_SECONDS = 0.8;       /* the turn waits at least this long, so the beam is seen */
 const TECTONIC_RADIUS_MM = 25;       /* Tectonic Shift: the turntable round the ball, 50 mm across */
 const TECTONIC_SECONDS = 2;          /* half a turn in this time */
+const TECTONIC_GRADE_MM = 80;        /* how far out from its edge the ground can even out, at 1 in 3 */
 const CLIMB_TIP_SPEED = 9;           /* Rock Climber: radians a second, tipping up to climb and back */
 const PUNCH_RANGE_MM = 100;          /* One Punch: how far the blade of light reaches */
 const PUNCH_ANGLE_DEG = 7;           /* its whole width, as an angle at the piece */
@@ -1135,7 +1155,7 @@ const PERKS = [
   { id: "emp", type: "ball", cools: 2, name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work. Then it needs 2 turns before it can be used again." },
   { id: "punch", type: "fire", special: true, cools: 2, name: "One Punch", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then aim inside the red circle. Instead of a shell, the piece throws a blade of white light 100 mm long and 7\u00b0 wide, like the flame's slice. Anything within 1 mm of its middle line takes 50 damage; anything else it touches takes 45 and is thrown 30 mm back. A ball takes no damage, but is pushed 20 mm. Rail road, barbed wire, rock, cliffs, plants, webs, puddles and mushrooms in the slice are erased, and the ground there is cut down to 5 mm below the base line, its sides sloping up 1 mm for every 3 mm, like any hillside. Then it needs 2 turns before it can be used again." },
   { id: "divine", type: "fire", special: true, cools: 2, name: "Divine Destruction", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. The cannon fires as usual, and leaves a glowing circle where the shell lands and another straight through the globe from there. Next turn, 2 seconds in, a white laser drives through both circles and the whole globe between. The laser is as wide as the shell's whole damage area (40 mm across for a plain shell, wider with Big shell, narrower with Armor Piercing). Every piece in it, balls and diggers too, is erased, and it leaves a hole that wide that nothing can cross, not even by tunneling. Then it needs 2 turns before it can be used again." },
-  { id: "tectonic", type: "ball", special: true, cools: 2, name: "Tectonic Shift", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a circle of ground 50 mm across, round it, becomes a turntable and turns half way round over 2 seconds as the turn plays. Everything on it turns with it: hills, rock and cliffs, track, wire, webs, puddles and plants. Every piece on it, from any side, is carried round, and its orders turn with it: a move or a shot goes the same distance and direction from the piece as it was ordered, so it ends up somewhere else on the map. A piece that drives off stops turning; one that drives on starts. Track and wire are cut where they cross its edge, and so is rock, except the frozen rock. The ice and anything frozen stay where they are, and the ice spreads as usual. Then it needs 2 turns before it can be used again." },
+  { id: "tectonic", type: "ball", special: true, cools: 2, name: "Tectonic Shift", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a circle of ground 50 mm across, round it, becomes a turntable and turns half way round over 2 seconds as the turn plays. Everything on it turns with it: hills, rock and cliffs, track, wire, webs, puddles and plants. Every piece on it, from any side, is carried round, and its orders turn with it: a move or a shot goes the same distance and direction from the piece as it was ordered, so it ends up somewhere else on the map. When it stops, the ground along its edge evens out so no slope is steeper than 1 mm in 3. A piece that drives off stops turning; one that drives on starts. Track and wire are cut where they cross its edge, and so is rock, except the frozen rock. The ice and anything frozen stay where they are, and the ice spreads as usual. Then it needs 2 turns before it can be used again." },
   { id: "arena", type: "ball", special: true, cools: 2, name: "Tournament Arc", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a ring of cliff 5 mm wide rises 60 mm out from the piece, and stays for the rest of the game. Anything standing where it rises is pushed off it, unhurt. From next turn on, this piece and any teammates inside the ring have Melee, Tunneling and Double Move, with no wait between uses. A piece that didn't have them loses them again once it's outside the ring. Then it needs 2 turns before it can be used again." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
@@ -4208,7 +4228,8 @@ function startBoard() {
   function refreshGround(bend = null) {
     const r = radiusMm();
     /* around a rising hill, only what it can reach; otherwise everything */
-    const reachMm = !bend ? 0 : bend.quake ? bend.quake.radius + 3 : BEND_TOP_MM + bend.apex / BEND_GRADE + 3;
+    const reachMm = !bend ? 0 : bend.quake ? bend.quake.radius + 3 + (bend.quake.kind === "warp" && bend.quake.angle >= Math.PI - 1e-6 ? TECTONIC_GRADE_MM : 0)
+      : BEND_TOP_MM + bend.apex / BEND_GRADE + 3;
     const area = bend ? { at: bend.at, cos: Math.cos(Math.min(Math.PI, reachMm / r)) } : null;
     const near = (v) => !area || v.clone().normalize().dot(area.at) >= area.cos;
     raiseGround(area);
