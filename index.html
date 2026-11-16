@@ -974,7 +974,6 @@ const RECUPERATE_HP = 5;
 const SELF_DESTRUCT_SECONDS = 2;
 const EMP_RADIUS_MM = 50;
 const EMP_CHARGE_SECONDS = 0.3;   /* after the piece is a ball */
-const DIVINE_RADIUS_MM = 10;         /* of the laser, and of the hole it leaves */
 const DIVINE_CHARGE_SECONDS = 2;     /* into the turn after the shot */
 const ARENA_RADIUS_MM = 60;          /* Tournament Arc: to the middle of the ring of cliff */
 const ARENA_WIDTH_MM = 5;
@@ -1077,8 +1076,8 @@ const PERKS = [
   { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: while the piece is moving, nothing but a cannon shell, a Self Destruct or the ice can hurt it. Then it needs 3 turns before it can be used again." },
   { id: "tamer", type: "fire", cools: 2, name: "Beetle Tamer", text: "If this turn's shell hits a beetle, you control that beetle next turn: pick it and send it charging, up to 45 mm. It won't ram your own pieces or hold a grudge for the shot. Then it needs 2 turns before it can be used again." },
   { id: "emp", type: "ball", cools: 2, name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work. Then it needs 2 turns before it can be used again." },
-  { id: "divine", type: "fire", special: true, cools: 2, name: "Divine Destruction", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. The cannon fires as usual, and leaves a glowing circle where the shell lands and another straight through the globe from there. Next turn, 2 seconds in, a white laser drives through both circles and the whole globe between. Every piece in it, balls and diggers too, is erased, and it leaves a hole 20 mm wide that nothing can cross, not even by tunneling. Then it needs 2 turns before it can be used again." },
-  { id: "arena", type: "ball", special: true, cools: 3, name: "Tournament Arc", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a ring of cliff 5 mm wide rises 60 mm out from the piece, and stays for the rest of the game. Anything standing where it rises is pushed off it, unhurt. From next turn on, this piece and any teammates inside the ring have Melee, Tunneling and Double Move, with no wait between uses. A piece that didn't have them loses them again once it's outside the ring. Then it needs 3 turns before it can be used again." },
+  { id: "divine", type: "fire", special: true, cools: 2, name: "Divine Destruction", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. The cannon fires as usual, and leaves a glowing circle where the shell lands and another straight through the globe from there. Next turn, 2 seconds in, a white laser drives through both circles and the whole globe between. The laser is as wide as the shell's whole damage area (40 mm across for a plain shell, wider with Big shell, narrower with Armor Piercing). Every piece in it, balls and diggers too, is erased, and it leaves a hole that wide that nothing can cross, not even by tunneling. Then it needs 2 turns before it can be used again." },
+  { id: "arena", type: "ball", special: true, cools: 2, name: "Tournament Arc", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a ring of cliff 5 mm wide rises 60 mm out from the piece, and stays for the rest of the game. Anything standing where it rises is pushed off it, unhurt. From next turn on, this piece and any teammates inside the ring have Melee, Tunneling and Double Move, with no wait between uses. A piece that didn't have them loses them again once it's outside the ring. Then it needs 2 turns before it can be used again." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
 const BIG_RADIUS_MM = BLAST_RADIUS_MM * 2;
@@ -1088,6 +1087,9 @@ const DIRECT_HIT_DAMAGE = 50;
 const PIERCE_RADIUS_MM = 5;          /* the whole blast of an armor piercing shell */
 const PIERCE_DAMAGE = 50;            /* to anything inside it */
 const PIERCE_BALL_DAMAGE = 25;       /* to a piece rolled into a ball */
+
+/* Divine Destruction: the laser and its hole are as wide as the shell's whole damage area. */
+const divineRadius = (mods) => { const bands = shellBands(mods); return bands[bands.length - 1].within; };
 
 /* What a shell does, from the shell perks that are on. They combine:
    Armor Piercing sets the blast to 5 mm, 50 damage, and 25 to a ball.
@@ -3235,7 +3237,7 @@ function startBoard() {
     /* Divine Destruction: where the laser will go through, here and on the far side */
     if (mods.divine) {
       for (const end of [spot.clone().normalize(), spot.clone().normalize().negate()]) {
-        group.add(new THREE.Mesh(capGeometry(end, DIVINE_RADIUS_MM / r - line * 1.5, DIVINE_RADIUS_MM / r), divineAimPaint));
+        group.add(new THREE.Mesh(capGeometry(end, divineRadius(mods) / r - line * 1.5, divineRadius(mods) / r), divineAimPaint));
       }
     }
     return group;
@@ -4614,7 +4616,16 @@ function startBoard() {
   const BOT_BEETLE_CLEAR_MM = 30;
   function beetleLines(piece) {
     /* A Divine Destruction circle is just as bad a place to be next turn. */
-    const lasers = beams.filter((b) => b.stage === "marked").flatMap((b) => holeEnds(b).map((end) => ({ dots: [end], end: null })));
+    const lasers = beams.filter((b) => b.stage === "marked").flatMap((b) => holeEnds(b).map((end) => {
+      const [a, c] = tangentPair(end);
+      const edge = Math.max(0, b.radius - 8) / radiusMm();
+      const dots = [end];
+      for (let k = 0; edge > 0 && k < 8; k++) {
+        const out = a.clone().multiplyScalar(Math.cos(k * Math.PI / 4)).addScaledVector(c, Math.sin(k * Math.PI / 4));
+        dots.push(end.clone().applyAxisAngle(new THREE.Vector3().crossVectors(end, out).normalize(), edge));
+      }
+      return { dots, end: null };
+    }));
     return lasers.concat(beetles().filter((b) => !tamedNow(b, piece.team)).map((b) => {
       const end = b.plan || b.up;
       const axis = new THREE.Vector3().crossVectors(b.up, end);
@@ -4815,7 +4826,7 @@ function startBoard() {
           if (hasPerk(piece, "puddle") && Math.random() < (ice.rock ? 0.5 : 0.2)) piece.perksOn.add("puddle");
           if (hasPerk(piece, "tamer") && perkReady(piece, "tamer") && nearest.team === BEETLE_TEAM) piece.perksOn.add("tamer");
           /* Divine Destruction, where it won't catch its own side next turn */
-          const laserSafe = !pieces.some((p) => p.team === piece.team && !p.decoy && [landing, landing.clone().negate()].some((end) => mmBetween(p.up, end) <= DIVINE_RADIUS_MM + 30));
+          const laserSafe = !pieces.some((p) => p.team === piece.team && !p.decoy && [landing, landing.clone().negate()].some((end) => mmBetween(p.up, end) <= divineRadius(shellMods(piece)) + 30));
           if (hasPerk(piece, "divine") && perkReady(piece, "divine") && laserSafe && Math.random() < 0.5) piece.perksOn.add("divine");
           if (hasPerk(piece, "pushpull") && perkReady(piece, "pushpull") && Math.random() < 0.4) {
             piece.perksOn.add("pushpull");
@@ -5543,7 +5554,7 @@ function startBoard() {
           addPuddle(shell.target, Math.max(bands.length ? bands[bands.length - 1].within : 0, shell.mods.web ? webRadius(shell.mods) : 0));
         }
         if (shellBands(shell.mods).length) explode(shell.target, shell);
-        if (shell.mods.divine) markDivine(shell.target, shell.shooter);
+        if (shell.mods.divine) markDivine(shell.target, shell.shooter, divineRadius(shell.mods));
       }
     }
 
@@ -8098,8 +8109,8 @@ function startBoard() {
   const beamShape = new THREE.CylinderGeometry(1, 1, 1, 32, 1, true);
   const BEAM_TOP = 2.8;                /* in sphere radii from the centre, well out in space */
   const holeEnds = (thing) => [thing.up, thing.up.clone().negate()];
-  function markDivine(spot, shooter) {
-    const beam = { up: spot.clone().normalize(), radius: DIVINE_RADIUS_MM, turn: turnState.number + 1, owner: shooter, ownerTeam: shooter.team, stage: "marked", time: 0 };
+  function markDivine(spot, shooter, radius) {
+    const beam = { up: spot.clone().normalize(), radius, turn: turnState.number + 1, owner: shooter, ownerTeam: shooter.team, stage: "marked", time: 0 };
     drawBeamMarks(beam);
     beams.push(beam);
     announce("Divine Destruction: next turn a laser goes straight through the globe at the glowing circles.", beam.up);
