@@ -787,6 +787,10 @@ function indexTerrain(features) {
 function terrainHeightAt(features, waves, x, y, z, radiusMm) {
   const length = Math.sqrt(x * x + y * y + z * z) || 1;
   x /= length; y /= length; z /= length;
+  return layeredHeight(features, waves, x, y, z, radiusMm, (features.bends || []).length, plainHeightAt(features, waves, x, y, z, radiusMm));
+}
+/* The hills and valleys as laid out, before anything changed them. (x, y, z) is a unit direction. */
+function plainHeightAt(features, waves, x, y, z, radiusMm) {
   const list = features.cells ? features.cells[terrainCell(x, y, z)] : features;
   let height = 0;
   if (list.length) {
@@ -799,7 +803,23 @@ function terrainHeightAt(features, waves, x, y, z, radiusMm) {
     }
     height = high + low;
   }
-  return bentHeight(features.bends, x, y, z, radiusMm, height);
+  return height;
+}
+/* The first `count` changes to the ground, in the order they were made, over the plain
+   height there. A Tectonic Shift turns the ground on it: there, the ground from before it
+   is the ground that was at the turned-back spot. `plain` is the plain height here. */
+function layeredHeight(features, waves, x, y, z, radiusMm, count, plain) {
+  const bends = features.bends || [];
+  for (let i = count - 1; i >= 0; i--) {
+    const warp = bends[i].quake;
+    if (!warp || warp.kind !== "warp" || !warp.angle) continue;
+    const c = warp.at.x * x + warp.at.y * y + warp.at.z * z;
+    if (Math.acos(Math.max(-1, Math.min(1, c))) * radiusMm > warp.radius) continue;
+    const q = new THREE.Vector3(x, y, z).applyAxisAngle(warp.at, -warp.angle);
+    const below = layeredHeight(features, waves, q.x, q.y, q.z, radiusMm, i, plainHeightAt(features, waves, q.x, q.y, q.z, radiusMm));
+    return bentHeight(bends, x, y, z, radiusMm, below, i + 1, count);
+  }
+  return bentHeight(bends, x, y, z, radiusMm, plain, 0, count);
 }
 /* One Punch: inside its slice the ground is cut down to 5 mm below the base line, with
    steep sides out to the ground around it. Deeper valleys stay as deep as they are. */
@@ -813,10 +833,11 @@ function trenchHeight(punch, x, y, z, radiusMm, height) {
   return Math.min(height, PUNCH_DEPTH_MM + PUNCH_WALL * out);
 }
 /* Earth bending: a raised cone over the ground, the higher of the two wins. (x, y, z) is a unit direction. */
-function bentHeight(bends, x, y, z, radiusMm, height) {
-  for (const bend of bends || []) {
-    if (bend.punch) {
-      height = trenchHeight(bend.punch, x, y, z, radiusMm, height);
+function bentHeight(bends, x, y, z, radiusMm, height, from = 0, to = (bends || []).length) {
+  for (let k = from; k < to; k++) {
+    const bend = bends[k];
+    if (bend.quake) {
+      if (bend.quake.kind === "punch") height = trenchHeight(bend.quake, x, y, z, radiusMm, height);
       continue;
     }
     const d = Math.acos(Math.max(-1, Math.min(1, bend.at.x * x + bend.at.y * y + bend.at.z * z))) * radiusMm;
@@ -1112,7 +1133,7 @@ const PERKS = [
   { id: "emp", type: "ball", cools: 2, name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work. Then it needs 2 turns before it can be used again." },
   { id: "punch", type: "fire", special: true, cools: 2, name: "One Punch", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then aim inside the red circle. Instead of a shell, the piece throws a blade of white light 100 mm long and 7\u00b0 wide, like the flame's slice. Anything within 1 mm of its middle line takes 50 damage; anything else it touches takes 45 and is thrown 30 mm back. A ball takes no damage, but is pushed 20 mm. Rail road, barbed wire, rock, cliffs, plants, webs, puddles and mushrooms in the slice are erased, and the ground there is cut down to 5 mm below the base line. Then it needs 2 turns before it can be used again." },
   { id: "divine", type: "fire", special: true, cools: 2, name: "Divine Destruction", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. The cannon fires as usual, and leaves a glowing circle where the shell lands and another straight through the globe from there. Next turn, 2 seconds in, a white laser drives through both circles and the whole globe between. The laser is as wide as the shell's whole damage area (40 mm across for a plain shell, wider with Big shell, narrower with Armor Piercing). Every piece in it, balls and diggers too, is erased, and it leaves a hole that wide that nothing can cross, not even by tunneling. Then it needs 2 turns before it can be used again." },
-  { id: "tectonic", type: "ball", special: true, cools: 2, name: "Tectonic Shift", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a circle of ground 50 mm across, round it, becomes a turntable and turns half way round over 2 seconds as the turn plays. Every piece on it, from any side, is carried round, and its orders turn with it: a move or a shot goes the same distance and direction from the piece as it was ordered, so it ends up somewhere else on the map. A piece that drives off stops turning; one that drives on starts. Rock doesn't turn, and stops a piece being carried into it. The ice spreads as usual. Then it needs 2 turns before it can be used again." },
+  { id: "tectonic", type: "ball", special: true, cools: 2, name: "Tectonic Shift", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a circle of ground 50 mm across, round it, becomes a turntable and turns half way round over 2 seconds as the turn plays. Everything on it turns with it: hills, rock and cliffs, track, wire, webs, puddles and plants. Every piece on it, from any side, is carried round, and its orders turn with it: a move or a shot goes the same distance and direction from the piece as it was ordered, so it ends up somewhere else on the map. A piece that drives off stops turning; one that drives on starts. Track and wire are cut where they cross its edge, and so is rock, except the frozen rock. The ice and anything frozen stay where they are, and the ice spreads as usual. Then it needs 2 turns before it can be used again." },
   { id: "arena", type: "ball", special: true, cools: 2, name: "Tournament Arc", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a ring of cliff 5 mm wide rises 60 mm out from the piece, and stays for the rest of the game. Anything standing where it rises is pushed off it, unhurt. From next turn on, this piece and any teammates inside the ring have Melee, Tunneling and Double Move, with no wait between uses. A piece that didn't have them loses them again once it's outside the ring. Then it needs 2 turns before it can be used again." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
@@ -2966,7 +2987,10 @@ function startBoard() {
   const holes = [];            /* Divine Destruction: { up, radius }, right through the globe, for the rest of the game */
   const beams = [];            /* Divine Destruction lasers still to come or playing out */
   const dashes = [];           /* Lightning Dash beams, until the end of the turn */
-  const punches = [];          /* One Punch slices, for the rest of the game: { origin, ahead, side } */
+  /* Changes to the ground for the rest of the game, in order: One Punch slices
+     { kind: "punch", origin, ahead, side } and Tectonic Shift turns { kind: "warp", at, radius, angle } */
+  const quakes = [];
+  const quakeBend = (quake) => ({ quake, at: quake.at || quake.origin, grow: 1 });
   const punchFx = [];          /* the blades of light while they shine */
   const shifts = [];           /* Tectonic Shift turntables, while they turn */
   let selected = null;
@@ -3733,12 +3757,11 @@ function startBoard() {
       rocks.push(rock);
     }
     for (const arena of arenas) rocks.push(arenaRock(arena));
-    for (const punch of punches) cutRocks(punch);
 
     layOutTerrain();
     shapeRocks();
     layOutPlants();
-    for (const punch of punches) erasePlants(punch);
+    if (quakes.length) recutRocks();
     needsDraw = true;
   }
 
@@ -4028,7 +4051,7 @@ function startBoard() {
     const high = new Float32Array(count);
     const low = new Float32Array(count);
     terrain.length = 0;
-    terrain.bends = punches.map((punch) => ({ punch, grow: 1 }));
+    terrain.bends = quakes.map(quakeBend);
     for (const [sign, target, list, other, most, make] of [[1, TERRAIN_HIGH_SHARE, high, low, Math.round(TERRAIN_MAX * 0.6), hill], [-1, TERRAIN_LOW_SHARE, low, high, TERRAIN_MAX, valley]]) {
       let covered = 0;
       for (let tries = 0; tries < (sign > 0 ? 600 : 4000) && covered / count < target && terrain.length < most; tries++) {
@@ -4091,7 +4114,7 @@ function startBoard() {
       if (outside(i)) continue;
       const x = groundBase[i * 3], y = groundBase[i * 3 + 1], z = groundBase[i * 3 + 2];
       const length = Math.sqrt(x * x + y * y + z * z) || 1;
-      heights[i] = bentHeight(terrain.bends, x / length, y / length, z / length, r, plainHeights[i]);
+      heights[i] = layeredHeight(terrain, terrain.waves, x / length, y / length, z / length, r, terrain.bends.length, plainHeights[i]);
       const scale = (1 + heights[i] / r) / (Math.sqrt(x * x + y * y + z * z) || 1);
       out[i * 3] = x * scale; out[i * 3 + 1] = y * scale; out[i * 3 + 2] = z * scale;
     }
@@ -4136,10 +4159,11 @@ function startBoard() {
   function refreshGround(bend = null) {
     const r = radiusMm();
     /* around a rising hill, only what it can reach; otherwise everything */
-    const area = bend ? { at: bend.at, cos: Math.cos(Math.min(Math.PI, (BEND_TOP_MM + bend.apex / BEND_GRADE + 3) / r)) } : null;
+    const reachMm = !bend ? 0 : bend.quake ? bend.quake.radius + 3 : BEND_TOP_MM + bend.apex / BEND_GRADE + 3;
+    const area = bend ? { at: bend.at, cos: Math.cos(Math.min(Math.PI, reachMm / r)) } : null;
     const near = (v) => !area || v.clone().normalize().dot(area.at) >= area.cos;
     raiseGround(area);
-    const rockNear = (rock) => rock.up.angleTo(area.at) * r < rock.reach + BEND_TOP_MM + bend.apex / BEND_GRADE + 5;
+    const rockNear = (rock) => rock.up.angleTo(area.at) * r < rock.reach + reachMm + 2;
     if (!area) shapeRocks();
     else if (rocks.some(rockNear)) shapeRocks(rockNear);
     const matrix = new THREE.Matrix4();
@@ -8142,41 +8166,40 @@ function startBoard() {
   }
 
   /* ---------- Tectonic Shift ---------- */
-  /* A circle of ground 50 mm across round the ball turns half way round, like a turntable. Pieces on it
-     are carried round, and their orders turn with them. */
+  /* A circle of ground 50 mm across round the ball turns half way round, like a turntable,
+     with everything on it. Pieces on it are carried round, and their orders turn with them. */
   const shiftPaint = new THREE.MeshBasicMaterial({ color: linear("#ffcf6e"), transparent: true, opacity: 0.85, depthWrite: false, side: THREE.DoubleSide });
-  const shiftFill = new THREE.MeshBasicMaterial({ color: linear("#ffcf6e"), transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide });
   function startShift(piece) {
     usePerk(piece, "tectonic");
-    const r = radiusMm();
-    const shift = { up: piece.up.clone().normalize(), age: 0, turned: 0, spokes: null };
-    shift.meshes = [
-      new THREE.Mesh(capGeometry(shift.up, (TECTONIC_RADIUS_MM - 1.2) / r, TECTONIC_RADIUS_MM / r, 4), shiftPaint),
-      new THREE.Mesh(capGeometry(shift.up, 0, (TECTONIC_RADIUS_MM - 1.2) / r), shiftFill),
-    ];
-    globe.add(...shift.meshes);
+    const warp = { kind: "warp", at: piece.up.clone().normalize(), radius: TECTONIC_RADIUS_MM, angle: 0 };
+    const shift = { up: warp.at, warp, age: 0, turned: 0, meshes: [], drawnAt: -1 };
+    quakes.push(warp);
+    shift.bend = quakeBend(warp);
+    terrain.bends.push(shift.bend);
+    shift.shards = splitRocks(warp);
+    shift.carried = gatherCarried(warp);
     shifts.push(shift);
     drawSpokes(shift);
     floatLabel(piece, "Tectonic Shift", "hit heal");
     sound.explosion(0.6, false);
   }
-  /* Six spokes that turn with it, drawn on the ground as it is under them. */
+  /* A ring at the edge and six spokes that turn, drawn on the ground as it is now. */
   function drawSpokes(shift) {
-    if (shift.spokes) {
-      globe.remove(shift.spokes);
-      shift.spokes.geometry.dispose();
+    for (const mesh of shift.meshes) {
+      globe.remove(mesh);
+      mesh.geometry.dispose();
     }
     const r = radiusMm();
     const start = tangentPair(shift.up)[0];
     const positions = [];
     const index = [];
-    const SPOKES = 6, STEPS = 20, HALF_MM = 0.7;
+    const SPOKES = 6, STEPS = 20, HALF_MM = 0.6;
     for (let k = 0; k < SPOKES; k++) {
       const dir = start.clone().applyAxisAngle(shift.up, shift.turned + (k / SPOKES) * Math.PI * 2);
       const axis = new THREE.Vector3().crossVectors(shift.up, dir).normalize();
       const base = positions.length / 3;
       for (let j = 0; j <= STEPS; j++) {
-        const mid = shift.up.clone().applyAxisAngle(axis, (4 + ((TECTONIC_RADIUS_MM - 5) * j) / STEPS) / r);
+        const mid = shift.up.clone().applyAxisAngle(axis, (3 + ((TECTONIC_RADIUS_MM - 4) * j) / STEPS) / r);
         for (const side of [-1, 1]) {
           const point = onGround(mid.clone().addScaledVector(axis, (side * HALF_MM) / r).normalize(), 1 + 0.6 / r);
           positions.push(point.x, point.y, point.z);
@@ -8187,24 +8210,190 @@ function startBoard() {
         }
       }
     }
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    geometry.setIndex(index);
-    shift.spokes = new THREE.Mesh(geometry, shiftPaint);
-    globe.add(shift.spokes);
+    const spokes = new THREE.BufferGeometry();
+    spokes.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    spokes.setIndex(index);
+    shift.meshes = [
+      new THREE.Mesh(spokes, shiftPaint),
+      new THREE.Mesh(capGeometry(shift.up, (TECTONIC_RADIUS_MM - 1) / r, TECTONIC_RADIUS_MM / r, 3), shiftPaint),
+    ];
+    globe.add(...shift.meshes);
     needsDraw = true;
   }
   function stepShifts(seconds) {
     for (const shift of [...shifts]) {
       shift.age += seconds;
       const t = Math.min(1, shift.age / TECTONIC_SECONDS);
-      const goal = Math.PI * t * t * (3 - 2 * t);   /* eases in and out */
+      const goal = Math.PI * t * t * (3 - 2 * t);   /* eases in and out, and ends exactly half way round */
       const step = goal - shift.turned;
-      shift.turned = goal;
-      if (step > 0) turnTable(shift, step);
-      drawSpokes(shift);
+      if (step > 0) {
+        shift.turned = goal;
+        shift.warp.angle = goal;
+        turnRocks(shift.shards, goal);
+        carryRound(shift.carried, new THREE.Quaternion().setFromAxisAngle(shift.up, step), step);
+        turnTable(shift, step);
+        shift.bend.dirty = true;   /* the ground and what's on it are redrawn a few times a second */
+      }
+      if (shift.age - shift.drawnAt >= 1 / 30 || t === 1) {
+        drawSpokes(shift);
+        shift.drawnAt = shift.age;
+      }
       if (shift.age >= TECTONIC_SECONDS + 0.3) removeShift(shift);
     }
+  }
+  /* Rock on the turntable: each stone or stretch of cliff on it becomes a rock of its own
+     that turns, and the rest stays. The frozen rock (and the one about to freeze) stays. */
+  function splitRocks(warp) {
+    const r = radiusMm();
+    const shards = [];
+    for (const rock of [...rocks]) {
+      if (rock === ice.rock || rock === ice.future) continue;
+      if (rock.up.angleTo(warp.at) * r > rock.reach + warp.radius) continue;
+      const on = (x, y) => rockToSphere(rock, x, y, r, 0).normalize().angleTo(warp.at) * r <= warp.radius;
+      const stonesIn = rock.stones.filter((stone) => on(stone.x, stone.y));
+      let chainsIn = null, chainsOut = null;
+      if (rock.chains) {
+        chainsIn = [];
+        chainsOut = [];
+        for (const nodes of rock.chains) {
+          let run = null;
+          const runs = [];
+          for (const node of nodes) {
+            const side = on(node.x, node.y);
+            if (!run || run.side !== side) runs.push(run = { side, nodes: [] });
+            run.nodes.push(node);
+          }
+          for (const { side, nodes: part } of runs) {
+            if (part.length < 2) continue;
+            (side ? chainsIn : chainsOut).push(runs.length === 1 ? nodes : part);
+          }
+        }
+      }
+      if (!stonesIn.length && !(chainsIn && chainsIn.length)) continue;
+      if (!rock.whole) rock.whole = { stones: rock.stones, chains: rock.chains };
+      const shard = { ...rock, stones: stonesIn, chains: chainsIn, shard: true, whole: null, shapeKept: null,
+        warp, base: { up: rock.up.clone(), e1: rock.e1.clone(), e2: rock.e2.clone() } };
+      rock.stones = rock.stones.filter((stone) => !stonesIn.includes(stone));
+      rock.chains = chainsOut;
+      restRock(rock);
+      restRock(shard);
+      rocks.push(shard);
+      shards.push(shard);
+    }
+    return shards;
+  }
+  function turnRocks(shards, angle) {
+    for (const shard of shards) {
+      const q = new THREE.Quaternion().setFromAxisAngle(shard.warp.at, angle);
+      shard.up = shard.base.up.clone().applyQuaternion(q).normalize();
+      shard.e1 = shard.base.e1.clone().applyQuaternion(q);
+      shard.e2 = shard.base.e2.clone().applyQuaternion(q);
+      restRock(shard);
+    }
+  }
+  /* What lies on the turntable as it starts, to carry round with it. Track and wire are
+     cut at its edge, and only the part on it turns. The ice and anything frozen stay. */
+  function gatherCarried(warp) {
+    const r = radiusMm();
+    const on = (v) => v.clone().normalize().angleTo(warp.at) * r <= warp.radius;
+    return {
+      rails: splitRails(on),
+      wires: splitWires(on),
+      patches: [...webs, ...puddles, ...splats].filter((thing) => on(thing.spot)),
+      mushrooms: mushrooms.filter((m) => on(m.up)),
+      tunnels: tunnels.filter((mouth) => on(mouth.position)),
+      plants: (plants.spots || []).filter((spot) => on(spot.up)),
+    };
+  }
+  function carryRound(carried, q, step) {
+    const turn = (v) => v.clone().applyQuaternion(q).normalize();
+    for (const line of [...carried.rails, ...carried.wires]) {
+      line.points = line.points.map(turn);
+      line.bound = null;
+    }
+    for (const thing of carried.patches) {
+      thing.spot = turn(thing.spot);
+      thing.heading = (thing.heading || 0) + step;
+    }
+    for (const mushroom of carried.mushrooms) {
+      mushroom.up = turn(mushroom.up);
+      if (mushroom.mesh) {
+        mushroom.mesh.position.applyQuaternion(q);
+        mushroom.mesh.quaternion.premultiply(q);
+      }
+    }
+    for (const mouth of carried.tunnels) {
+      mouth.position.applyQuaternion(q);
+      mouth.quaternion.premultiply(q);
+    }
+    for (const spot of carried.plants) {
+      spot.up = turn(spot.up);
+      spot.turn = spot.turn.clone().premultiply(q);
+    }
+  }
+  /* Track split at an edge: each run on either side becomes a line of its own, joined as
+     before except across the edge. Returns the runs inside. */
+  function splitRails(inside) {
+    const cut = rails.filter((line) => line.points.some(inside));
+    if (!cut.length) return [];
+    const old = rails.slice();
+    const joins = railJoins.map(([la, ia, lb, ib]) => [old[la], ia, old[lb], ib]);
+    const where = new Map();
+    const fresh = [];
+    for (const line of cut) {
+      const map = [];
+      let run = null;
+      line.points.forEach((q, i) => {
+        const side = inside(q);
+        if (!run || run.inside !== side) {
+          run = { points: [], inside: side };
+          if (line.fake) Object.assign(run, { fake: true, team: line.team, layer: line.layer });
+          fresh.push(run);
+        }
+        map[i] = [run, run.points.length];
+        run.points.push(q);
+      });
+      where.set(line, map);
+      if (line.mesh) {
+        globe.remove(line.mesh);
+        line.mesh.geometry.dispose();
+        line.mesh = null;
+      }
+    }
+    const lines = old.filter((line) => !where.has(line)).concat(fresh);
+    const at = (line, i) => (where.has(line) ? where.get(line)[i] : [line, i]);
+    railJoins.length = 0;
+    for (const [a, ia, b, ib] of joins) {
+      const ends = [at(a, ia), at(b, ib)];
+      if (!ends[0] || !ends[1] || !!ends[0][0].inside !== !!ends[1][0].inside) continue;
+      railJoins.push([lines.indexOf(ends[0][0]), ends[0][1], lines.indexOf(ends[1][0]), ends[1][1]]);
+    }
+    rails.length = 0;
+    rails.push(...lines);
+    for (const piece of pieces) if (piece.railLine && where.has(piece.railLine)) piece.railLine = null;
+    for (const line of fresh) redrawRail(line);
+    return fresh.filter((line) => line.inside);
+  }
+  function splitWires(inside) {
+    const carried = [];
+    for (const line of wires.filter((w) => w.points.some(inside))) {
+      const runs = [];
+      let run = null;
+      for (const q of line.points) {
+        const side = inside(q);
+        if (!run || run.side !== side) runs.push(run = { side, points: [] });
+        run.points.push(q);
+      }
+      removeWire(line);
+      for (const { side, points } of runs) {
+        const part = { points, owner: line.owner, hitBy: new Map(line.hitBy), medalTurn: line.medalTurn };
+        if (line.fake) Object.assign(part, { fake: true, team: line.team });
+        wires.push(part);
+        redrawWire(part);
+        if (side) carried.push(part);
+      }
+    }
+    return carried;
   }
   /* Carries round every piece on the turntable just now, with its orders. A piece riding
      the railroad stays on the track, and an igloo stays frozen. */
@@ -8218,7 +8407,7 @@ function startBoard() {
       forward.addScaledVector(up, -forward.dot(up)).normalize();
       if (!piece.digging) {
         const gap = rockGap({ up, forward, curl: piece.curl, size: piece.size });
-        if (gap < 0 && gap < rockGap(piece)) continue;   /* jammed against rock: the ground slides under it */
+        if (gap < 0 && gap < rockGap(piece)) continue;   /* jammed against rock that doesn't turn */
       }
       piece.up = up;
       piece.forward = forward;
@@ -8234,8 +8423,8 @@ function startBoard() {
     }
   }
   function removeShift(shift) {
-    for (const mesh of [...shift.meshes, shift.spokes]) {
-      if (!mesh) continue;
+    refreshGround(shift.bend);
+    for (const mesh of shift.meshes) {
       globe.remove(mesh);
       mesh.geometry.dispose();
     }
@@ -8243,7 +8432,10 @@ function startBoard() {
     needsDraw = true;
   }
   function clearShifts() {
-    while (shifts.length) removeShift(shifts[0]);
+    while (shifts.length) {
+      for (const mesh of shifts[0].meshes) globe.remove(mesh);
+      shifts.shift();
+    }
   }
 
   /* ---------- One Punch ---------- */
@@ -8349,7 +8541,7 @@ function startBoard() {
   }
   function clearPunches() {
     while (punchFx.length) removePunchFx(punchFx[0]);
-    punches.length = 0;
+    quakes.length = 0;
   }
   /* The blade at full length: everything in it is hit at once, then the ground goes. */
   function strikePunch(fx) {
@@ -8357,10 +8549,11 @@ function startBoard() {
     const far = punch.origin.clone().applyAxisAngle(punch.side, PUNCH_RANGE_MM / radiusMm());
     addBlast(far, 9, 0.6, true, { ball: "#ffffff", floor: "#cfe8ff" });
     punchPieces(punch, shooter);
-    punches.push(punch);
+    punch.kind = "punch";
+    quakes.push(punch);
     cutRocks(punch);
     clearPunched(punch);
-    terrain.bends.push({ punch, grow: 1 });
+    terrain.bends.push(quakeBend(punch));
     refreshGround();
   }
   /* 50 within 1 mm of the middle line, 45 anywhere else, and thrown 30 mm back. A ball
@@ -8447,8 +8640,10 @@ function startBoard() {
     rock.reach = Math.max(0, ...rock.stones.map((n) => Math.hypot(n.x, n.y) + n.radius * STONE_REACH), ...(nodes || []).map((n) => Math.hypot(n.x, n.y) + n.width));
     rock.shapeKept = null;
   }
-  /* Online: the rocks as they were, cut again by every punch so far. */
+  /* Online, or laid out again: the rocks and plants as they were, then every punch and
+     turn so far, in order. */
   function recutRocks() {
+    for (const rock of rocks.filter((x) => x.shard)) rocks.splice(rocks.indexOf(rock), 1);
     for (const rock of rocks) {
       if (!rock.whole) continue;
       rock.stones = rock.whole.stones;
@@ -8456,11 +8651,22 @@ function startBoard() {
       rock.whole = null;
       restRock(rock);
     }
-    for (const punch of punches) {
-      cutRocks(punch);
-      erasePlants(punch);
+    layOutPlants();
+    for (const quake of quakes) {
+      if (quake.kind === "warp") {
+        turnRocks(splitRocks(quake), quake.angle);
+        const q = new THREE.Quaternion().setFromAxisAngle(quake.at, quake.angle);
+        for (const spot of plants.spots) {
+          if (spot.up.angleTo(quake.at) * radiusMm() > quake.radius) continue;
+          spot.up = spot.up.clone().applyQuaternion(q).normalize();
+          spot.turn = spot.turn.clone().premultiply(q);
+        }
+      } else {
+        cutRocks(quake);
+        erasePlants(quake);
+      }
     }
-    shapeRocks();
+    refreshGround();
   }
   /* Everything lying in the slice goes. Track and wire are cut, leaving the rest. */
   function clearPunched(punch) {
@@ -9746,7 +9952,7 @@ function startBoard() {
   const V = (v) => [v.x, v.y, v.z];
   const toV = (a) => new THREE.Vector3(a[0], a[1], a[2]);
   /* Earth bends and One Punch trenches, in the order they were made */
-  const packBends = () => terrain.bends.map((bend) => (bend.punch ? { punch: punches.indexOf(bend.punch) } : { at: V(bend.at), apex: bend.apex }));
+  const packBends = () => terrain.bends.map((bend) => (bend.quake ? { quake: quakes.indexOf(bend.quake) } : { at: V(bend.at), apex: bend.apex }));
   const packValue = (x) => (x instanceof THREE.Vector3 ? { v: V(x) } : x instanceof Set ? { set: [...x] } : Array.isArray(x) ? x.map(packValue) : x);
   const unpackValue = (x) => (Array.isArray(x) ? x.map(unpackValue)
     : x && typeof x === "object" ? (x.v ? toV(x.v) : x.set ? new Set(x.set) : x) : x);
@@ -9790,7 +9996,7 @@ function startBoard() {
       mushrooms: mushrooms.filter((m) => !m.gone).map((m) => ({ up: V(m.up), stage: m.stage, turns: m.turns })),
       frozen: frozen.map((mesh) => mesh.userData.frozenData).filter(Boolean),
       bends: packBends(),
-      punches: punches.map((q) => ({ origin: V(q.origin), ahead: V(q.ahead) })),
+      quakes: quakes.map((q) => (q.kind === "warp" ? { kind: "warp", at: V(q.at), radius: q.radius, angle: q.angle } : { kind: "punch", origin: V(q.origin), ahead: V(q.ahead) })),
       holes: holes.map((hole) => ({ up: V(hole.up), radius: hole.radius })),
       arenas: arenas.map((a) => ({ up: V(a.up), team: a.team, turn: a.turn, seed: a.seed })),
       beams: beams.filter((b) => b.stage === "marked").map((b) => ({ up: V(b.up), radius: b.radius, turn: b.turn, owner: b.owner.id, ownerTeam: b.ownerTeam })),
@@ -9951,21 +10157,25 @@ function startBoard() {
     ice.reach = snap.ice.reach;
     ice.goal = snap.ice.goal;
     ice.spreads = snap.ice.spreads;
-    const punchesChanged = !same(here.punches || [], snap.punches || []);
-    if (punchesChanged) {
-      punches.length = 0;
-      for (const data of snap.punches || []) {
+    const quakesChanged = !same(here.quakes || [], snap.quakes || []);
+    if (quakesChanged) {
+      quakes.length = 0;
+      for (const data of snap.quakes || []) {
+        if (data.kind === "warp") {
+          quakes.push({ kind: "warp", at: toV(data.at), radius: data.radius, angle: data.angle });
+          continue;
+        }
         const origin = toV(data.origin), ahead = toV(data.ahead);
-        punches.push({ origin, ahead, side: new THREE.Vector3().crossVectors(origin, ahead) });
+        quakes.push({ kind: "punch", origin, ahead, side: new THREE.Vector3().crossVectors(origin, ahead) });
       }
     }
     if (snap.bends && !same(snap.bends, packBends())) {
-      terrain.bends = snap.bends.map((bend) => (bend.punch != null ? { punch: punches[bend.punch], grow: 1 } : { at: toV(bend.at), apex: bend.apex, grow: 1 }))
-        .filter((bend) => !("punch" in bend) || bend.punch);
+      terrain.bends = snap.bends.map((bend) => (bend.quake != null ? (quakes[bend.quake] ? quakeBend(quakes[bend.quake]) : null) : { at: toV(bend.at), apex: bend.apex, grow: 1 }))
+        .filter(Boolean);
       refreshGround();
     }
     if (Array.isArray(snap.ice.steps)) setIceSteps(snap.ice.steps);
-    const recut = punchesChanged || !same(here.arenas, snap.arenas || []);
+    const recut = quakesChanged || !same(here.arenas, snap.arenas || []);
     if (!same(here.arenas, snap.arenas || [])) {
       for (const rock of rocks.filter((x) => x.arena)) rocks.splice(rocks.indexOf(rock), 1);
       arenas.length = 0;
