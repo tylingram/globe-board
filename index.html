@@ -890,10 +890,10 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
     shader.uniforms.uIceReach = iceReach;
     shader.uniforms.uIceStep = iceStep;
     shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vBallPoint;\nattribute float aIceDist;\nvarying float vIceDist;" + (hills ? "\nattribute float aElev;\nvarying float vElev;" : ""))
-      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvBallPoint = position;\nvIceDist = aIceDist;" + (hills ? "\nvElev = aElev;" : ""));
+      .replace("#include <common>", "#include <common>\nvarying vec3 vBallPoint;\nattribute float aIceDist;\nvarying float vIceDist;" + (hills ? "\nattribute float aElev;\nvarying float vElev;\nattribute float aArena;\nvarying float vArena;" : ""))
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvBallPoint = position;\nvIceDist = aIceDist;" + (hills ? "\nvElev = aElev;\nvArena = aArena;" : ""));
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", "#include <common>\n" + GROUND_SHADER + (hills ? "\nvarying float vElev;" : "") + "\nuniform float uIceReach;\nuniform float uIceStep;\nvarying float vIceDist;")
+      .replace("#include <common>", "#include <common>\n" + GROUND_SHADER + (hills ? "\nvarying float vElev;\nvarying float vArena;" : "") + "\nuniform float uIceReach;\nuniform float uIceStep;\nvarying float vIceDist;")
       .replace("#include <color_fragment>", `
         #include <color_fragment>
         vec3 groundMm = normalize(vBallPoint) * uRadiusMm;
@@ -939,6 +939,9 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
             * step(0.5, abs(level)) * smoothstep(0.02, 0.05, slopeSeen);
           diffuseColor.rgb = mix(diffuseColor.rgb, ${literal("#2e2114")}, line * (0.45 + bold * 0.25));
         }
+
+        /* Tournament Arc: the arena's own ground, wherever it has been carried, in light purple */
+        ${hills ? `diffuseColor.rgb = mix(diffuseColor.rgb, ${literal("#c4a2ff")}, smoothstep(0.2, 0.8, vArena) * 0.38);` : ""}
 
         /* Ice, in mm from its edge: below zero is frozen, and a pale band with a thin
            line marks where it reaches next. */
@@ -1158,7 +1161,7 @@ const PERKS = [
   { id: "heart", type: "fire", special: true, cools: 2, name: "Shared Heart", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on and fire: the piece nearest the blast that the shell hurts, yours or an enemy's, shares this piece's heart (shown with \u2665). From then on, half of any damage this piece takes (rounded down) goes to that piece instead. It can't be used again until that piece dies, and needs 2 turns after it's used." },
   { id: "divine", type: "fire", special: true, cools: 2, name: "Divine Destruction", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. The cannon fires as usual, and leaves a glowing circle where the shell lands and another straight through the globe from there. Next turn, 2 seconds in, a white laser drives through both circles and the whole globe between. The laser is as wide as the shell's whole damage area (40 mm across for a plain shell, wider with Big shell, narrower with Armor Piercing). Every piece in it, balls and diggers too, is erased, and it leaves a hole that wide that nothing can cross, not even by tunneling. Then it needs 2 turns before it can be used again." },
   { id: "tectonic", type: "ball", special: true, cools: 2, name: "Tectonic Shift", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a circle of ground 50 mm across, round it, becomes a turntable and turns half way round over 2 seconds as the turn plays. Everything on it turns with it: hills, rock and cliffs, track, wire, webs, puddles and plants. Every piece on it, from any side, is carried round, and its orders turn with it: a move or a shot goes the same distance and direction from the piece as it was ordered, so it ends up somewhere else on the map. When it stops, the ground along its edge evens out so no slope is steeper than 1 mm in 3. A piece that drives off stops turning; one that drives on starts. Track and wire are cut where they cross its edge, and so is rock, except the frozen rock. The ice and anything frozen stay where they are, and the ice spreads as usual. Then it needs 2 turns before it can be used again." },
-  { id: "arena", type: "ball", special: true, cools: 2, name: "Tournament Arc", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a ring of cliff 5 mm wide rises 60 mm out from the piece, and stays for the rest of the game. Anything standing where it rises is pushed off it, unhurt. From next turn on, this piece and any teammates inside the ring have Melee, Tunneling and Double Move, with no wait between uses. A piece that didn't have them loses them again once it's outside the ring. Then it needs 2 turns before it can be used again." },
+  { id: "arena", type: "ball", special: true, cools: 2, name: "Tournament Arc", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a ring of cliff 5 mm wide rises 60 mm out from the piece, and stays for the rest of the game. Anything standing where it rises is pushed off it, unhurt. From next turn on, this piece and any teammates inside the ring have Melee, Tunneling and Double Move, with no wait between uses. A piece that didn't have them loses them again once it's off the arena's ground. That ground is marked light purple, and the perks belong to it, not to the cliff: breaking the ring changes nothing, and ground a Tectonic Shift carries off takes the perks with it. Then it needs 2 turns before it can be used again." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
 const BIG_RADIUS_MM = BLAST_RADIUS_MM * 2;
@@ -4205,6 +4208,7 @@ function startBoard() {
     }
     if (area && old) old.needsUpdate = true;
     else geometry.setAttribute("aElev", new THREE.BufferAttribute(heights, 1));
+    if (!area || arenas.length) paintArenaLand();
     /* normals across the grid: around and down, from the neighbours on each side */
     const at = (ix, iy) => ((iy * (across + 1)) + ((ix + across) % across)) * 3;
     const u = new THREE.Vector3(), v = new THREE.Vector3(), n = new THREE.Vector3(), p = new THREE.Vector3();
@@ -9432,8 +9436,9 @@ function startBoard() {
   }
   function raiseArena(piece) {
     usePerk(piece, "arena");
-    const arena = { up: piece.up.clone().normalize(), team: piece.team, turn: turnState.number, seed: Math.floor(rand() * 1e9) };
+    const arena = { up: piece.up.clone().normalize(), team: piece.team, turn: turnState.number, seed: Math.floor(rand() * 1e9), quakeAt: quakes.length };
     arenas.push(arena);
+    paintArenaLand();
     const rock = arenaRock(arena);
     rocks.push(rock);
     shapeRocks((other) => other === rock);
@@ -9472,8 +9477,48 @@ function startBoard() {
     }
     return false;
   }
+  /* The arena's land: the ground that was inside the ring when it rose. The perks go with
+     the land, not the cliff: breaking the ring changes nothing, and ground a Tectonic Shift
+     carries off takes them with it. Painted light purple. (x, y, z) is a unit direction. */
+  function arenaLandAt(arena, x, y, z) {
+    const r = radiusMm();
+    let p = null;
+    for (let i = quakes.length - 1; i >= (arena.quakeAt || 0); i--) {
+      const q = quakes[i];
+      if (q.kind !== "warp" || !q.angle) continue;
+      const v = p || new THREE.Vector3(x, y, z);
+      if (Math.acos(Math.max(-1, Math.min(1, v.dot(q.at)))) * r > q.radius) continue;
+      p = v.clone().applyAxisAngle(q.at, -q.angle);
+    }
+    const c = p ? p.dot(arena.up) : arena.up.x * x + arena.up.y * y + arena.up.z * z;
+    return Math.acos(Math.max(-1, Math.min(1, c))) * r < ARENA_RADIUS_MM - ARENA_WIDTH_MM / 2;
+  }
+  const onArenaLand = (arena, v) => { const u = v.clone().normalize(); return arenaLandAt(arena, u.x, u.y, u.z); };
   const inArena = (piece) => piece.team !== BEETLE_TEAM && !piece.decoy
-    && arenas.some((a) => a.team === piece.team && a.turn < turnState.number && mmBetween(a.up, piece.up) < ARENA_RADIUS_MM - ARENA_WIDTH_MM / 2);
+    && arenas.some((a) => a.team === piece.team && a.turn < turnState.number && onArenaLand(a, piece.up));
+  /* The purple on the ground, one value per point of the ground mesh. */
+  function paintArenaLand() {
+    const geometry = groundMesh.geometry;
+    const count = geometry.attributes.position.count;
+    let attr = geometry.attributes.aArena;
+    if (!attr || attr.count !== count) {
+      attr = new THREE.BufferAttribute(new Float32Array(count), 1);
+      geometry.setAttribute("aArena", attr);
+    }
+    const r = radiusMm();
+    for (let i = 0; i < count; i++) {
+      if (!arenas.length) { attr.array[i] = 0; continue; }
+      const x = groundBase[i * 3], y = groundBase[i * 3 + 1], z = groundBase[i * 3 + 2];
+      const length = Math.sqrt(x * x + y * y + z * z) || 1;
+      /* quick: only near an arena, or near a turntable that may have carried some of it */
+      const u = [x / length, y / length, z / length];
+      const near = arenas.some((a) => Math.acos(Math.max(-1, Math.min(1, a.up.x * u[0] + a.up.y * u[1] + a.up.z * u[2]))) * r < ARENA_RADIUS_MM + 2)
+        || quakes.some((q) => q.kind === "warp" && Math.acos(Math.max(-1, Math.min(1, q.at.x * u[0] + q.at.y * u[1] + q.at.z * u[2]))) * r < q.radius + 1);
+      attr.array[i] = near && arenas.some((a) => arenaLandAt(a, u[0], u[1], u[2])) ? 1 : 0;
+    }
+    attr.needsUpdate = true;
+    needsDraw = true;
+  }
   /* At the start of each turn: inside, a piece is lent whichever of the three it lacks;
      outside, it gives back what it was lent. */
   function lendArenaPerks() {
@@ -10421,7 +10466,7 @@ function startBoard() {
       bends: packBends(),
       quakes: quakes.map((q) => (q.kind === "warp" ? { kind: "warp", at: V(q.at), radius: q.radius, angle: q.angle } : { kind: "punch", origin: V(q.origin), ahead: V(q.ahead) })),
       holes: holes.map((hole) => ({ up: V(hole.up), radius: hole.radius })),
-      arenas: arenas.map((a) => ({ up: V(a.up), team: a.team, turn: a.turn, seed: a.seed })),
+      arenas: arenas.map((a) => ({ up: V(a.up), team: a.team, turn: a.turn, seed: a.seed, quakeAt: a.quakeAt || 0 })),
       beams: beams.filter((b) => b.stage === "marked").map((b) => ({ up: V(b.up), radius: b.radius, turn: b.turn, owner: b.owner.id, ownerTeam: b.ownerTeam })),
       ice: { rock: ice.rock ? rocks.indexOf(ice.rock) : -1, future: ice.future ? rocks.indexOf(ice.future) : -1, reach: ice.reach, goal: ice.goal, spreads: ice.spreads, steps: iceSteps },
       picks,
@@ -10603,13 +10648,14 @@ function startBoard() {
       for (const rock of rocks.filter((x) => x.arena)) rocks.splice(rocks.indexOf(rock), 1);
       arenas.length = 0;
       for (const data of snap.arenas || []) {
-        const arena = { up: toV(data.up), team: data.team, turn: data.turn, seed: data.seed };
+        const arena = { up: toV(data.up), team: data.team, turn: data.turn, seed: data.seed, quakeAt: data.quakeAt || 0 };
         arenas.push(arena);
         rocks.push(arenaRock(arena));
       }
       shapeRocks();
     }
     if (recut) recutRocks();
+    if (recut) paintArenaLand();
     if (!same(here.holes, snap.holes || [])) {
       clearHoles();
       for (const data of snap.holes || []) addHole({ up: toV(data.up), radius: data.radius });
