@@ -982,6 +982,7 @@ const ARENA_RADIUS_MM = 60;          /* Tournament Arc: to the middle of the rin
 const ARENA_WIDTH_MM = 5;
 const ARENA_PERKS = ["melee", "tunnel", "double"];   /* lent to the arena's side while inside */
 const ARENA_PAINT = { a: "#d2b183", b: "#8f6c43" };
+const TRADE_RANGE_MM = 100;          /* Trading Spaces: how far away the other piece can be */
 const DASH_DAMAGE = 10;              /* Lightning Dash: to an enemy touching the beam */
 const DASH_KNOCK_MM = 10;
 const DASH_HOLD_SECONDS = 0.8;       /* the turn waits at least this long, so the beam is seen */
@@ -1077,6 +1078,7 @@ const PERKS = [
   { id: "secondchance", type: "passive", passive: true, name: "Second Chance", text: "Once: lets the piece fire its cannon two turns in a row, or roll into a ball two turns in a row. The perk is gone as soon as it's used." },
   { id: "indomitable", type: "fire", passive: true, cools: 2, name: "Indomitable Will", text: "Always on: a direct hit on a turn this piece fires its cannon does 49 damage instead of 50. Then it needs 2 turns before it can do that again." },
   { id: "dash", type: "move", special: true, cools: 2, name: "Lightning Dash", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on with a move: the piece is at the end of it in an instant, through other pieces, leaving a glowing beam of light along the way it went. Rock still stops it, unless it can tunnel. Every enemy piece touching the beam, then or later that turn, takes 10 damage (a ball takes none) and is knocked 10 mm away from it. Then it needs 2 turns before it can be used again." },
+  { id: "trade", type: "move", special: true, cools: 2, name: "Trading Spaces", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then click any piece within 100 mm, yours or an enemy's (not a beetle). As the turn starts the two swap places in a flash of light. That is this piece's whole turn. The other piece still does what it was ordered, as if it were where it started: a move or a shot goes the same distance and direction, from its new spot, so it lands somewhere else on the map. Then it needs 2 turns before it can be used again." },
   { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: while the piece is moving, nothing but a cannon shell, a Self Destruct or the ice can hurt it. Then it needs 3 turns before it can be used again." },
   { id: "tamer", type: "fire", cools: 2, name: "Beetle Tamer", text: "If this turn's shell hits a beetle, you control that beetle next turn: pick it and send it charging, up to 45 mm. It won't ram your own pieces or hold a grudge for the shot. Then it needs 2 turns before it can be used again." },
   { id: "emp", type: "ball", cools: 2, name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work. Then it needs 2 turns before it can be used again." },
@@ -3118,6 +3120,7 @@ function startBoard() {
     return "Click one of your pieces to give it an order.";
   };
   const orderMessage = () => {
+    if (orderLeg === "trade") return "Trading Spaces: click any piece inside the purple circle, yours or an enemy's, to swap places with it as the turn starts.";
     if (action === "ball") return "This piece will roll into a ball. Pick Move or Fire cannon to change that, or click the piece to cancel.";
     const rolled = selected && selected.curl === 1 ? "This piece uncurls first. " : "";
     const medals = "";
@@ -3182,7 +3185,8 @@ function startBoard() {
   function drawCircle() {
     circleFill.visible = circleEdge.visible = !!selected && action !== "ball";
     if (!circleFill.visible) return;
-    const firing = action === "fire";
+    const trading = orderLeg === "trade";
+    const firing = action === "fire" && !trading;
     const faking = orderLeg === "decoy";
     circleFill.material.color.copy(firing ? linear("#e02828") : faking ? linear("#7fd8ff") : linear("#12b5b0"));
     circleEdge.material.color.copy(firing ? linear("#c91f1f") : faking ? linear("#4fbdf0") : linear("#0a9a96"));
@@ -3211,13 +3215,13 @@ function startBoard() {
     } else {
       circleFill.material = plainFill;
       circleEdge.material = plainEdge;
-      const range = (firing ? fireReach(selected) : moveReach(selected)) / radiusMm();
+      const range = (trading ? TRADE_RANGE_MM : firing ? fireReach(selected) : moveReach(selected)) / radiusMm();
       const edge = markWidthMm() / radiusMm();
       circleFill.geometry = capGeometry(orderFrom(), 0, range);
       circleEdge.geometry = capGeometry(orderFrom(), range - edge, range);
     }
-    circleFill.material.color.copy(firing ? linear("#e02828") : faking ? linear("#7fd8ff") : linear("#12b5b0"));
-    circleEdge.material.color.copy(firing ? linear("#c91f1f") : faking ? linear("#4fbdf0") : linear("#0a9a96"));
+    circleFill.material.color.copy(trading ? linear("#a77bff") : firing ? linear("#e02828") : faking ? linear("#7fd8ff") : linear("#12b5b0"));
+    circleEdge.material.color.copy(trading ? linear("#8a55ff") : firing ? linear("#c91f1f") : faking ? linear("#4fbdf0") : linear("#0a9a96"));
     needsDraw = true;
   }
 
@@ -3260,6 +3264,9 @@ function startBoard() {
     color: linear("#0a8a86"), transparent: true, opacity: 0.95, depthWrite: false, side: THREE.DoubleSide,
   });
 
+  const tradePaint = new THREE.MeshBasicMaterial({
+    color: linear("#9d6bff"), transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide,
+  });
   const hologramPaint = new THREE.MeshBasicMaterial({
     color: linear("#7fd8ff"), transparent: true, opacity: 0.5, depthWrite: false, side: THREE.DoubleSide,
   });
@@ -3334,6 +3341,14 @@ function startBoard() {
       piece.aimMark = new THREE.Mesh(capGeometry(piece.up, (8 - markWidthMm() * 0.5) / r, 8 / r), rollPaint);
       globe.add(piece.aimMark);
     }
+    /* Trading Spaces: a purple arrow to the piece it will swap with */
+    if (piece.tradeWith && commands(piece) && !moving && pieces.includes(piece.tradeWith) && mmBetween(piece.up, piece.tradeWith.up) >= 4) {
+      const r = radiusMm();
+      const width = markWidthMm();
+      const link = new THREE.Mesh(arrowGeometry(piece.up, piece.tradeWith.up, 6 / r, width / 2 / r, (width * 3.2) / r), tradePaint);
+      globe.add(link);
+      piece.extraArrows.push(link);
+    }
     needsDraw = true;
   }
 
@@ -3403,7 +3418,7 @@ function startBoard() {
     if (orderLeg === "rail") glowRails(null);
     selected = piece;
     peeking = null;
-    orderLeg = "first";
+    orderLeg = piece && perkOn(piece, "trade") && !piece.tradeWith ? "trade" : "first";
     action = !piece ? "move" : piece.fire ? "fire" : piece.roll ? "ball" : "move";
     drawPerks();
     drawCircle();
@@ -3494,6 +3509,11 @@ function startBoard() {
     }
     clearOrders(piece);
     orderLeg = "first";
+    if (id === "trade") {
+      piece.tradeWith = null;
+      if (perkOn(piece, "trade")) orderLeg = "trade";
+      drawArrow(piece);
+    }
     drawPerks();
     drawCircle();
     say(orderMessage());
@@ -4687,6 +4707,10 @@ function startBoard() {
   }
 
   function chooseBotMoves() {
+    chooseBotMovesFirst();
+    bots().forEach(botTrade);
+  }
+  function chooseBotMovesFirst() {
     const chosenBy = {};
     const spotToward = (piece, heading, spread, reachMm) => {
       const aim = heading.clone().applyAxisAngle(piece.up, (Math.random() - 0.5) * spread);
@@ -5044,7 +5068,15 @@ function startBoard() {
     }, shortest + Math.random() * (longest - shortest));
   }
 
+  /* Trading Spaces is a whole turn: any other order for the piece calls it off. */
+  function dropTrade(piece) {
+    if (!perkOn(piece, "trade") && !piece.tradeWith) return;
+    piece.perksOn.delete("trade");
+    piece.tradeWith = null;
+    drawPerks();
+  }
   function giveOrder(piece, spot, distance) {
+    dropTrade(piece);
     if (action === "fire") {
       if (orderLeg === "secondShot") {
         piece.fire2 = spot;
@@ -5152,6 +5184,7 @@ function startBoard() {
     const piece = selected;
     /* The piece stays picked, so you can still switch to a move or a shot, or switch on a ball perk. */
     if (next === "ball") {
+      dropTrade(piece);
       clearOrders(piece);
       piece.roll = true;
       drawArrow(piece);
@@ -5179,6 +5212,22 @@ function startBoard() {
     }
     if (gameOver) return;
     const spot = surfaceAt(clientX, clientY);
+    if (selected && orderLeg === "trade") {
+      const other = pieceAt(clientX, clientY);
+      if (other && other !== selected && other.team !== BEETLE_TEAM && mmBetween(selected.up, other.up) <= TRADE_RANGE_MM) {
+        const piece = selected;
+        clearOrders(piece);
+        piece.tradeWith = other;
+        select(null);
+        drawArrow(piece);
+        say(`Trading places with ${other.team === localTeam ? "your piece" : teamName(other.team) + "'s piece"} as the turn starts. That's this piece's turn. Order another piece, or end your turn.`);
+      } else if (other === selected) {
+        say("Click another piece inside the purple circle to trade places with, yours or an enemy's.");
+      } else {
+        say(other && other.team === BEETLE_TEAM ? "Beetles can't be traded with. Click a piece inside the purple circle." : "Click a piece inside the purple circle to trade places with, yours or an enemy's.");
+      }
+      return;
+    }
     if (selected && spot) {
       const distance = mmBetween(orderFrom(), spot);
       if (orderLeg === "first" && distance < PIECE_LENGTH_MM / 2 && !railNear(spot, 0)) {
@@ -5421,6 +5470,7 @@ function startBoard() {
     for (const decoy of pieces.filter((p) => p.decoy)) removePiece(decoy);
     removeRailLines(rails.filter((line) => line.fake));
     for (const line of wires.filter((w) => w.fake)) removeWire(line);
+    tradePlaces();
     for (const piece of pieces.filter(emped)) {
       piece.perksOn.clear();
       piece.fire = piece.fire2 = piece.flameAt = null;
@@ -5722,7 +5772,7 @@ function startBoard() {
     }
     if (piece.fireFx) setOnFire(piece, false);
     if (piece.sparkFx) setSparks(piece, false);
-    piece.emp = piece.arenaRise = null;
+    piece.emp = piece.arenaRise = piece.tradeWith = null;
     if (piece.sword) piece.sword.visible = false;
     if (piece.shot && piece.shot.glow) piece.mesh.remove(piece.shot.glow);
     if (piece.boom && piece.boom.glow) piece.mesh.remove(piece.boom.glow);
@@ -8035,6 +8085,66 @@ function startBoard() {
     }
   }
 
+  /* ---------- Trading Spaces ---------- */
+  /* Orders carried from one spot to another: the same move, shot or flame, turned to
+     start from the new spot. Rail routes don't come along: the track stays where it is. */
+  function carryOrders(piece, from, to) {
+    const q = new THREE.Quaternion().setFromUnitVectors(from.clone().normalize(), to.clone().normalize());
+    for (const key of ["plan", "plan2", "decoyPlan", "fire", "fire2", "flameAt"]) {
+      if (piece[key]) piece[key] = piece[key].clone().applyQuaternion(q).normalize();
+    }
+    piece.railPath = null;
+    piece.forward.applyQuaternion(q).addScaledVector(to, -piece.forward.dot(to)).normalize();
+  }
+  function tradePlaces() {
+    const done = new Set();
+    for (const piece of pieces.filter((p) => p.tradeWith && !p.decoy)) {
+      const other = piece.tradeWith;
+      piece.tradeWith = null;
+      if (done.has(piece)) continue;
+      const fine = perkOn(piece, "trade") && perkReady(piece, "trade") && pieces.includes(other) && !other.decoy
+        && other.team !== BEETLE_TEAM && !done.has(other) && mmBetween(piece.up, other.up) <= TRADE_RANGE_MM + 0.5;
+      if (!fine) {
+        if (other.decoy) floatLabel(piece, "Only a decoy", "hit");
+        continue;
+      }
+      usePerk(piece, "trade");
+      /* the swap is this piece's whole turn */
+      piece.plan = piece.plan2 = piece.decoyPlan = piece.fire = piece.fire2 = piece.flameAt = piece.railPath = null;
+      piece.roll = false;
+      const here = piece.up.clone();
+      const there = other.up.clone();
+      /* the other piece's orders travel with it: same distance and direction, from its new spot */
+      other.tradeWith = null;
+      carryOrders(other, there, here);
+      piece.forward.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(here, there)).addScaledVector(there, -piece.forward.dot(there)).normalize();
+      piece.up = there;
+      other.up = here;
+      done.add(piece);
+      done.add(other);
+      for (const swapped of [piece, other]) {
+        poseOnSphere(swapped);
+        drawArrow(swapped);
+        addBlast(swapped.up.clone(), 9, 0.7, true, { ball: "#f1e6ff", floor: "#9d6bff" });
+      }
+      floatLabel(piece, "Trading Spaces", "hit heal");
+      floatLabel(other, "Swapped", "hit");
+      sound.explosion(0.3, false);
+    }
+  }
+  /* A bot about to be caught by the ice trades places with an enemy well clear of it. */
+  function botTrade(piece) {
+    if (!hasPerk(piece, "trade") || !perkReady(piece, "trade") || iceMargin(piece.up, piece) >= 30) return;
+    const swap = pieces.filter((p) => p.team !== piece.team && p.team !== BEETLE_TEAM && !p.decoy && mmBetween(p.up, piece.up) <= TRADE_RANGE_MM && iceMargin(p.up) > 45)
+      .sort((x, y) => iceMargin(y.up) - iceMargin(x.up))[0];
+    if (!swap) return;
+    piece.plan = piece.plan2 = piece.decoyPlan = piece.fire = piece.fire2 = piece.flameAt = piece.railPath = null;
+    piece.roll = false;
+    piece.perksOn.clear();
+    piece.perksOn.add("trade");
+    piece.tradeWith = swap;
+  }
+
   /* ---------- Lightning Dash ---------- */
   /* The whole move happens at once, through other pieces, and leaves a beam of light
      along the way. The beam lasts the turn and knocks back every enemy that touches it. */
@@ -9125,7 +9235,7 @@ function startBoard() {
   /* What isn't game state: meshes and labels, the motion of a turn in progress, and
      links to other things, which are sent as ids instead. */
   const PIECE_SKIP = new Set(["mesh", "tag", "arrow", "aimMark", "aimMark2", "extraArrows", "legs", "antennae", "curlParts",
-    "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "sparkFx", "emp", "arenaRise", "rollQ", "flameMark",
+    "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "sparkFx", "emp", "arenaRise", "tradeWith", "rollQ", "flameMark",
     "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt", "turnOverlap", "dopeFire", "plainShot", "rammed", "hatMesh", "stopSlice"]);
   function packPiece(piece) {
     const out = {};
@@ -9140,7 +9250,7 @@ function startBoard() {
   }
   const ORDER_KEYS = ["plan", "plan2", "decoyPlan", "fire", "fire2", "flameAt", "railPath"];
   const packOrders = (piece) => {
-    const out = { roll: !!piece.roll, perksOn: [...piece.perksOn], pushMode: piece.pushMode || null };
+    const out = { roll: !!piece.roll, perksOn: [...piece.perksOn], pushMode: piece.pushMode || null, tradeWith: piece.tradeWith ? piece.tradeWith.id : null };
     for (const key of ORDER_KEYS) out[key] = piece[key] ? packValue(piece[key]) : null;
     return out;
   };
@@ -9645,6 +9755,7 @@ function startBoard() {
       piece.roll = !!(order && order.roll);
       piece.perksOn = new Set(order ? order.perksOn : []);
       piece.pushMode = order && order.pushMode ? order.pushMode : piece.pushMode;
+      piece.tradeWith = order && order.tradeWith != null ? pieces.find((q) => q.id === order.tradeWith) || null : null;
       drawArrow(piece);
     }
     net.done.clear();
