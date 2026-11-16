@@ -821,12 +821,12 @@ function layeredHeight(features, waves, x, y, z, radiusMm, count, plain) {
   }
   return bentHeight(bends, x, y, z, radiusMm, plain, 0, count);
 }
-/* One Punch: inside its slice the ground is cut down to 5 mm below the base line, with
-   steep sides out to the ground around it. Deeper valleys stay as deep as they are. */
+/* One Punch: inside its slice the ground is cut down to 5 mm below the base line. Its
+   sides slope up 1 mm in 3 to the ground around it, like any slope. Deeper valleys stay. */
 function trenchHeight(punch, x, y, z, radiusMm, height) {
   const o = punch.origin, a = punch.ahead, s = punch.side;
   const mm = Math.acos(Math.max(-1, Math.min(1, o.x * x + o.y * y + o.z * z))) * radiusMm;
-  if (mm > PUNCH_RANGE_MM + 12) return height;
+  if (mm > PUNCH_RANGE_MM + (TERRAIN_HIGH_MM + 1 - PUNCH_DEPTH_MM) / PUNCH_WALL) return height;
   const angle = Math.abs(Math.atan2(s.x * x + s.y * y + s.z * z, a.x * x + a.y * y + a.z * z));
   const half = THREE.MathUtils.degToRad(PUNCH_ANGLE_DEG / 2);
   const out = angle > Math.PI / 2 ? mm : Math.hypot(Math.max(0, angle - half) * mm, Math.max(0, mm - PUNCH_RANGE_MM));
@@ -1032,7 +1032,7 @@ const PUNCH_DAMAGE = 45;             /* anywhere else in it */
 const PUNCH_KNOCK_MM = 30;           /* and thrown back this far */
 const PUNCH_BALL_KNOCK_MM = 20;      /* a ball takes no damage, but is pushed this far */
 const PUNCH_DEPTH_MM = -5;           /* the ground it hits is cut down to this */
-const PUNCH_WALL = 2;                /* the trench's sides: mm of height for each mm across */
+const PUNCH_WALL = 1 / 3;            /* the trench's sides: 1 mm up for every 3 mm across, the steepest any slope is */
 const PUNCH_GROW_SECONDS = 0.15;     /* it shoots out to full length in this time */
 const PUNCH_HOLD_SECONDS = 1.2;      /* and shines this long */
 const SPECIAL_KILLS = 3;             /* special perks can be picked by a piece with this many kills */
@@ -1127,11 +1127,12 @@ const PERKS = [
   { id: "secondchance", type: "passive", passive: true, name: "Second Chance", text: "Once: lets the piece fire its cannon two turns in a row, or roll into a ball two turns in a row. The perk is gone as soon as it's used." },
   { id: "indomitable", type: "fire", passive: true, cools: 2, name: "Indomitable Will", text: "Always on: a direct hit on a turn this piece fires its cannon does 49 damage instead of 50. Then it needs 2 turns before it can do that again." },
   { id: "dash", type: "move", special: true, cools: 2, name: "Lightning Dash", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on with a move: the piece is at the end of it in an instant, through other pieces, leaving a glowing beam of light along the way it went. Rock still stops it, unless it can tunnel. Every enemy piece touching the beam, then or later that turn, takes 10 damage (a ball takes none) and is knocked 10 mm away from it. Then it needs 2 turns before it can be used again." },
+  { id: "climber", type: "move", passive: true, special: true, name: "Rock Climber", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Always on: this piece climbs cliffs instead of stopping at them, and can walk along their tops. Boulders still stop it. On top of a cliff it stands as high as the cliff, and just like on a hill its cannon reaches 1 mm farther for every mm it stands above where the shell lands: from a 20 mm cliff over level ground, 120 mm. Shooting up at a piece on a cliff costs reach the same way." },
   { id: "trade", type: "move", special: true, cools: 2, name: "Trading Spaces", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then click any piece within 100 mm, yours or an enemy's (not a beetle). As the turn starts the two swap places in a flash of light. That is this piece's whole turn. The other piece still does what it was ordered, as if it were where it started: a move or a shot goes the same distance and direction, from its new spot, so it lands somewhere else on the map. Then it needs 2 turns before it can be used again." },
   { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: while the piece is moving, nothing but a cannon shell, a Self Destruct or the ice can hurt it. Then it needs 3 turns before it can be used again." },
   { id: "tamer", type: "fire", cools: 2, name: "Beetle Tamer", text: "If this turn's shell hits a beetle, you control that beetle next turn: pick it and send it charging, up to 45 mm. It won't ram your own pieces or hold a grudge for the shot. Then it needs 2 turns before it can be used again." },
   { id: "emp", type: "ball", cools: 2, name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work. Then it needs 2 turns before it can be used again." },
-  { id: "punch", type: "fire", special: true, cools: 2, name: "One Punch", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then aim inside the red circle. Instead of a shell, the piece throws a blade of white light 100 mm long and 7\u00b0 wide, like the flame's slice. Anything within 1 mm of its middle line takes 50 damage; anything else it touches takes 45 and is thrown 30 mm back. A ball takes no damage, but is pushed 20 mm. Rail road, barbed wire, rock, cliffs, plants, webs, puddles and mushrooms in the slice are erased, and the ground there is cut down to 5 mm below the base line. Then it needs 2 turns before it can be used again." },
+  { id: "punch", type: "fire", special: true, cools: 2, name: "One Punch", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then aim inside the red circle. Instead of a shell, the piece throws a blade of white light 100 mm long and 7\u00b0 wide, like the flame's slice. Anything within 1 mm of its middle line takes 50 damage; anything else it touches takes 45 and is thrown 30 mm back. A ball takes no damage, but is pushed 20 mm. Rail road, barbed wire, rock, cliffs, plants, webs, puddles and mushrooms in the slice are erased, and the ground there is cut down to 5 mm below the base line, its sides sloping up 1 mm for every 3 mm, like any hillside. Then it needs 2 turns before it can be used again." },
   { id: "divine", type: "fire", special: true, cools: 2, name: "Divine Destruction", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. The cannon fires as usual, and leaves a glowing circle where the shell lands and another straight through the globe from there. Next turn, 2 seconds in, a white laser drives through both circles and the whole globe between. The laser is as wide as the shell's whole damage area (40 mm across for a plain shell, wider with Big shell, narrower with Armor Piercing). Every piece in it, balls and diggers too, is erased, and it leaves a hole that wide that nothing can cross, not even by tunneling. Then it needs 2 turns before it can be used again." },
   { id: "tectonic", type: "ball", special: true, cools: 2, name: "Tectonic Shift", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a circle of ground 50 mm across, round it, becomes a turntable and turns half way round over 2 seconds as the turn plays. Everything on it turns with it: hills, rock and cliffs, track, wire, webs, puddles and plants. Every piece on it, from any side, is carried round, and its orders turn with it: a move or a shot goes the same distance and direction from the piece as it was ordered, so it ends up somewhere else on the map. A piece that drives off stops turning; one that drives on starts. Track and wire are cut where they cross its edge, and so is rock, except the frozen rock. The ice and anything frozen stay where they are, and the ice spreads as usual. Then it needs 2 turns before it can be used again." },
   { id: "arena", type: "ball", special: true, cools: 2, name: "Tournament Arc", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a ring of cliff 5 mm wide rises 60 mm out from the piece, and stays for the rest of the game. Anything standing where it rises is pushed off it, unhurt. From next turn on, this piece and any teammates inside the ring have Melee, Tunneling and Double Move, with no wait between uses. A piece that didn't have them loses them again once it's outside the ring. Then it needs 2 turns before it can be used again." },
@@ -3190,7 +3191,7 @@ function startBoard() {
       ? (aimingPunch(selected) ? "One Punch: click inside the red circle to aim it. The blade of light reaches the full 100 mm, 7\u00b0 wide, wherever you click."
         : aimingFlame(selected) ? "Click inside the red circle to aim the flame. Then you can pick a cannon shot too."
         : orderLeg === "afterFlame" ? "Flame aimed. Click inside the red circle for a cannon shot too, or deselect to skip it."
-        : `Click inside the red area to choose where the shell lands. This piece stands ${heightText(elevation(orderFrom()))}: higher ground reaches farther.`)
+        : `Click inside the red area to choose where the shell lands. This piece stands ${heightText(standHeight(orderFrom()))}: higher ground reaches farther.`)
       : "Click inside the circle to set where this piece goes. Click the piece itself to cancel its order.");
     const resting = [];
     if (selected && !canFire(selected)) resting.push("cannon");
@@ -3258,17 +3259,17 @@ function startBoard() {
       circleFill.material = rangeFill;
       circleEdge.material = rangeEdge;
       rangeUniforms.uEdge.value = markWidthMm();
-      const widest = (FIRE_RANGE_MM + TERRAIN_HIGH_MM + TERRAIN_LOW_MM + 2) / radiusMm();
+      const widest = (FIRE_RANGE_MM + TERRAIN_HIGH_MM + TERRAIN_LOW_MM + 30) / radiusMm();
       const area = capGeometry(orderFrom(), 0, widest, 72);
       /* for each point: its distance, less the cannon's reach to it (below 0 is in range) */
       const from = orderFrom().clone().normalize();
-      const base = FIRE_RANGE_MM + elevation(from);
+      const base = FIRE_RANGE_MM + standHeight(from);
       const places = area.attributes.position;
       const over = new Float32Array(places.count);
       const q = new THREE.Vector3();
       for (let i = 0; i < places.count; i++) {
         q.fromBufferAttribute(places, i).normalize();
-        over[i] = mmBetween(from, q) - (base - elevation(q));
+        over[i] = mmBetween(from, q) - (base - standHeight(q));
       }
       area.setAttribute("aOver", new THREE.BufferAttribute(over, 1));
       circleFill.geometry = area;
@@ -3372,7 +3373,7 @@ function startBoard() {
       if (piece.plan && piece.fire) extra(piece.plan2 || piece.plan, piece.fire, blastPaint);   /* Doping: the shot after the move */
       /* An X where the move will run into rock and stop short. A digger goes through. */
       if (piece.plan && commands(piece) && !moving && !perkOn(piece, "tunnel")) {
-        const stop = rockStopOnPath(piece.up, piece.plan) || (piece.plan2 ? rockStopOnPath(piece.plan, piece.plan2) : null);
+        const stop = rockStopOnPath(piece.up, piece.plan, piece) || (piece.plan2 ? rockStopOnPath(piece.plan, piece.plan2, piece) : null);
         if (stop) {
           const mark = blockedMark(stop);
           globe.add(mark);
@@ -3415,14 +3416,14 @@ function startBoard() {
 
   /* Where a crawl from one spot to another would first run into rock and stop, the way
      stopAtRocks stops it: the last spot before the rock, or null if it gets through. */
-  function rockStopOnPath(from, to) {
+  function rockStopOnPath(from, to, who = null) {
     const r = radiusMm();
     const total = mmBetween(from, to);
     if (total < 0.5) return null;
     const axis = new THREE.Vector3().crossVectors(from, to).normalize();
     const poseAt = (mm) => {
       const up = from.clone().applyAxisAngle(axis, mm / r).normalize();
-      return { up, forward: new THREE.Vector3().crossVectors(axis, up).normalize(), curl: 0 };
+      return { up, forward: new THREE.Vector3().crossVectors(axis, up).normalize(), curl: 0, perks: who && who.perks };
     };
     let last = poseAt(0);
     let lastGap = rockGap(last);
@@ -3619,7 +3620,7 @@ function startBoard() {
   /* Faces the piece along `forward` and stands it on `up`. */
   function poseOnSphere(piece) {
     const right = new THREE.Vector3().crossVectors(piece.up, piece.forward);
-    piece.mesh.position.copy(piece.up).multiplyScalar(1 + groundLift(piece.up));
+    piece.mesh.position.copy(piece.up).multiplyScalar(1 + groundLift(piece.up) + (climbs(piece) ? cliffTopAt(piece.up) / radiusMm() : 0));
     piece.mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, piece.up, piece.forward));
   }
 
@@ -4206,12 +4207,46 @@ function startBoard() {
   const elevation = (up) => terrainHeightAt(terrain, terrain.waves, up.x, up.y, up.z, radiusMm());
   /* A cannon reaches 100 mm between spots at the same height, 1 mm farther for every
      mm the target is below the shooter, and 1 mm less for every mm above. */
-  const cannonReach = (from, to) => FIRE_RANGE_MM + elevation(from) - elevation(to);
+  /* Rock Climber: cliffs don't stop the piece. Boulders still do. */
+  const climbs = (pose) => !!pose.perks && pose.perks.includes("climber");
+  /* How high a cliff's top stands over the ground at a spot, in mm: 0 off the cliff,
+     rising over its edge to the full height of the top. Boulders can't be climbed. */
+  function cliffTopAt(v) {
+    const r = radiusMm();
+    const up = v.clone().normalize();
+    let best = 0;
+    for (const rock of rocks) {
+      if (!rock.chains || !rock.chains.length || up.angleTo(rock.up) * r > rock.reach + 1) continue;
+      const [x, y] = sphereToRock(rock, up, r);
+      /* the nearest stretch of the cliff's middle line: how far in from its edge, and how high there */
+      let least = Infinity, top = 0, depth = 0, width = 1;
+      for (const nodes of rock.chains) {
+        for (let i = 0; i + 1 < nodes.length; i++) {
+          const a = nodes[i], b = nodes[i + 1];
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const span = dx * dx + dy * dy;
+          const t = span ? Math.min(1, Math.max(0, ((x - a.x) * dx + (y - a.y) * dy) / span)) : 0;
+          const d = Math.hypot(x - a.x - dx * t, y - a.y - dy * t);
+          if (d >= least) continue;
+          least = d;
+          width = a.width + (b.width - a.width) * t;
+          depth = width - d;
+          top = t < 0.5 ? a.height : b.height;   /* the top steps in blocks, node by node */
+        }
+      }
+      if (depth <= 0) continue;
+      best = Math.max(best, top * Math.min(1, depth / Math.max(0.5, width * 0.5)));
+    }
+    return best;
+  }
+  /* The height a piece stands at, or a shell lands at: the ground, or a cliff top on it. */
+  const standHeight = (v) => elevation(v) + cliffTopAt(v);
+  const cannonReach = (from, to) => FIRE_RANGE_MM + standHeight(from) - standHeight(to);
   const heightText = (mm) => (Math.abs(mm) < 0.5 ? "level" : `${mm > 0 ? "+" : "\u2212"}${Math.abs(mm).toFixed(0)} mm`);
 
   /* The room between a piece and the nearest rock or hole in mm. Below zero means touching. */
   function rockGap(pose) {
-    const stone = stoneGap(pose);
+    const stone = stoneGap(pose, rocks, climbs(pose));
     return holes.length ? Math.min(stone, holeGap(pose)) : stone;
   }
   /* The same for holes alone. A hole has two mouths, one each side of the globe. */
@@ -4229,12 +4264,13 @@ function startBoard() {
   }
   const holeGap = (pose) => Math.min(Infinity, ...holes.map((hole) => gapToHole(hole, pose)));
   /* The same for rock alone, which a digger can go through. */
-  function stoneGap(pose, list = rocks) {
+  function stoneGap(pose, list = rocks, overCliffs = false) {
     const r = radiusMm();
     const size = pose.size || 1;
     const length = pose.curl > 0.5 ? 0 : (PIECE_LENGTH_MM / 2 - PIECE_HALF_WIDTH_MM) * size;
     let least = Infinity;
     for (const rock of list) {
+      if (overCliffs && rock.chains) continue;
       if (pose.up.angleTo(rock.up) * r > rock.reach + PIECE_LENGTH_MM + Math.min(least, 60)) continue;
       for (const along of length ? [-1, -0.5, 0, 0.5, 1] : [0]) {
         const point = pose.up.clone().addScaledVector(pose.forward, (along * length) / r).normalize();
@@ -4247,16 +4283,17 @@ function startBoard() {
 
   /* Whether a piece could crawl straight between two spots without running into a
      rock. It faces along the route, and moving away from a rock it is touching is fine. */
-  function pathIsClear(from, to) {
+  function pathIsClear(from, to, who = null) {
     const axis = new THREE.Vector3().crossVectors(from, to).normalize();
     const distance = from.angleTo(to);
+    const perks = who && who.perks;
     /* a path of no length: just the spot itself (0 steps would make every point NaN) */
     const steps = Math.max(1, Math.ceil((distance * radiusMm()) / 2));
-    if (axis.lengthSq() < 1e-12) return rockGap({ up: from.clone(), forward: tangentPair(from)[0], curl: 0 }) >= 0.3;
+    if (axis.lengthSq() < 1e-12) return rockGap({ up: from.clone(), forward: tangentPair(from)[0], curl: 0, perks }) >= 0.3;
     let last = Infinity;
     for (let i = 0; i <= steps; i++) {
       const up = from.clone().applyAxisAngle(axis, (distance * i) / steps);
-      const gap = rockGap({ up, forward: new THREE.Vector3().crossVectors(axis, up), curl: 0 });
+      const gap = rockGap({ up, forward: new THREE.Vector3().crossVectors(axis, up), curl: 0, perks });
       if (gap < 0.3 && gap < last) return false;
       last = gap;
     }
@@ -4767,7 +4804,7 @@ function startBoard() {
     for (const option of options) {
       if (option.room < BOT_BEETLE_CLEAR_MM || tried === 6) break;
       tried++;
-      if (pathIsClear(piece.up, option.spot)) return option.spot;
+      if (pathIsClear(piece.up, option.spot, piece)) return option.spot;
     }
     return null;
   }
@@ -4840,7 +4877,7 @@ function startBoard() {
         if (food) {
           const axis = new THREE.Vector3().crossVectors(piece.up, food.up).normalize();
           const spot = piece.up.clone().applyAxisAngle(axis, Math.min(reach, mmBetween(piece.up, food.up)) / radiusMm());
-          if (pathIsClear(piece.up, spot)) {
+          if (pathIsClear(piece.up, spot, piece)) {
             piece.plan = spot;
             chosen.push(spot);
             continue;
@@ -4852,7 +4889,7 @@ function startBoard() {
       if (hasPerk(piece, "melee") && perkReady(piece, "melee") && gap > 8 && gap <= reach && Math.random() < style.melee) {
         const axis = new THREE.Vector3().crossVectors(piece.up, nearest.up).normalize();
         const past = piece.up.clone().applyAxisAngle(axis, Math.min(reach, gap + 6) / radiusMm());
-        if (iceMargin(past) > style.iceRun && !beetleRisky(lines, past) && pathIsClear(piece.up, past)) {
+        if (iceMargin(past) > style.iceRun && !beetleRisky(lines, past) && pathIsClear(piece.up, past, piece)) {
           piece.plan = past;
           piece.perksOn.add("melee");
           /* A charge at double speed, maybe with a fake alongside. */
@@ -4875,7 +4912,7 @@ function startBoard() {
           armBall(piece);
           continue;
         }
-        if (splat && mmBetween(splat.spot, piece.up) <= reach && pathIsClear(piece.up, splat.spot)) {
+        if (splat && mmBetween(splat.spot, piece.up) <= reach && pathIsClear(piece.up, splat.spot, piece)) {
           piece.plan = splat.spot.clone();
           chosen.push(piece.plan);
           continue;
@@ -4974,7 +5011,7 @@ function startBoard() {
           const apart = chosen.every((other) => mmBetween(other, spot) >= PIECE_LENGTH_MM * 1.5);
           const webbed = webs.some((web) => mmBetween(web.spot, spot) <= web.radius);
           if (tries < 22 && beetleRisky(lines, spot)) continue;
-          if (apart && !webbed && iceMargin(spot) > BOT_ICE_CLEAR_MM && pathIsClear(piece.up, spot)) break;
+          if (apart && !webbed && iceMargin(spot) > BOT_ICE_CLEAR_MM && pathIsClear(piece.up, spot, piece)) break;
         }
         piece.plan = spot;
         chosen.push(spot);
@@ -5029,7 +5066,7 @@ function startBoard() {
       return found.sort((x, y) => y.room - x.room);
     };
     const open = (start, spot) => !routeTouches(piece, start, spot)
-      && (pathIsClear(start, spot) || (hasPerk(piece, "tunnel") && restsClear(start, spot)));
+      && (pathIsClear(start, spot, piece) || (hasPerk(piece, "tunnel") && restsClear(start, spot)));
 
     let best = null;
     let bestScore = -Infinity;
@@ -5062,7 +5099,7 @@ function startBoard() {
     if (!rails.length || !piece.plan) return;
     const reach = moveReach(piece);
     const entry = railNear(piece.up, reach, piece.team);
-    if (!entry || !pathIsClear(piece.up, entry.point) || routeTouches(piece, piece.up, entry.point)) return;
+    if (!entry || !pathIsClear(piece.up, entry.point, piece) || routeTouches(piece, piece.up, entry.point)) return;
     const icy = iceMargin(piece.up) < 60;
     const score = (spot) => (icy ? iceMargin(spot) : -Math.abs(mmBetween(spot, nearest.up) - 70));
     const routes = railRoutes(entry, piece.team);
@@ -5095,14 +5132,14 @@ function startBoard() {
     if (hasPerk(piece, "tunnel") && !restsClear(piece.up, piece.plan)) piece.plan = digThrough(piece.up, piece.plan);
     if (hasPerk(piece, "double") && perkReady(piece, "double") && iceMargin(piece.up) < styleOf(piece.team).iceRun) {
       const next = escapeIce(piece, reach, piece.plan);
-      if (next && pathIsClear(piece.plan, next)) {
+      if (next && pathIsClear(piece.plan, next, piece)) {
         piece.perksOn.add("double");
         piece.plan2 = next;
       }
     } else if (hasPerk(piece, "double") && perkReady(piece, "double") && gap > FIRE_RANGE_MM && Math.random() < 0.7) {
       const axis = new THREE.Vector3().crossVectors(piece.plan, nearest.up).normalize();
       const next = piece.plan.clone().applyAxisAngle(axis, (reach * (0.6 + Math.random() * 0.4)) / radiusMm());
-      if (iceMargin(next) > BOT_ICE_CLEAR_MM && pathIsClear(piece.plan, next)) {
+      if (iceMargin(next) > BOT_ICE_CLEAR_MM && pathIsClear(piece.plan, next, piece)) {
         piece.perksOn.add("double");
         piece.plan2 = next;
       }
@@ -5769,7 +5806,7 @@ function startBoard() {
       mods: shellMods(piece),
       from: start.clone().normalize(),
       startRadius: start.length(),
-      endRadius: 1 + groundLift(piece.fire),
+      endRadius: 1 + groundLift(piece.fire) + cliffTopAt(piece.fire) / r,
       age: 0,
       mark: piece.aimMark,
     };
@@ -8406,7 +8443,7 @@ function startBoard() {
       const forward = piece.forward.clone().applyQuaternion(q);
       forward.addScaledVector(up, -forward.dot(up)).normalize();
       if (!piece.digging) {
-        const gap = rockGap({ up, forward, curl: piece.curl, size: piece.size });
+        const gap = rockGap({ up, forward, curl: piece.curl, size: piece.size, perks: piece.perks });
         if (gap < 0 && gap < rockGap(piece)) continue;   /* jammed against rock that doesn't turn */
       }
       piece.up = up;
