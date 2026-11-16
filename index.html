@@ -1024,6 +1024,7 @@ const DASH_KNOCK_MM = 10;
 const DASH_HOLD_SECONDS = 0.8;       /* the turn waits at least this long, so the beam is seen */
 const TECTONIC_RADIUS_MM = 25;       /* Tectonic Shift: the turntable round the ball, 50 mm across */
 const TECTONIC_SECONDS = 2;          /* half a turn in this time */
+const CLIMB_TIP_SPEED = 9;           /* Rock Climber: radians a second, tipping up to climb and back */
 const PUNCH_RANGE_MM = 100;          /* One Punch: how far the blade of light reaches */
 const PUNCH_ANGLE_DEG = 7;           /* its whole width, as an angle at the piece */
 const PUNCH_CORE_MM = 1;             /* this close to its middle line: the full blow */
@@ -1699,14 +1700,15 @@ function capGeometry(up, innerAngle, outerAngle, rings = 28) {
 }
 
 /* An arrow lying along the shortest path over the sphere. Sizes are in sphere radii. */
-function arrowGeometry(from, to, startGap, halfWidth, headLength) {
+/* `raise` (optional) lifts each point by that much more, in sphere radii: over cliff tops. */
+function arrowGeometry(from, to, startGap, halfWidth, headLength, raise = null) {
   const distance = from.angleTo(to);
   const along = to.clone().addScaledVector(from, -to.dot(from)).normalize();
   const side = new THREE.Vector3().crossVectors(from, along).normalize();
-  const spot = (angle, offset) => onGround(from.clone().multiplyScalar(Math.cos(angle))
-    .addScaledVector(along, Math.sin(angle))
-    .addScaledVector(side, offset)
-    .normalize(), MARK_LIFT);
+  const spot = (angle, offset) => {
+    const v = from.clone().multiplyScalar(Math.cos(angle)).addScaledVector(along, Math.sin(angle)).addScaledVector(side, offset).normalize();
+    return onGround(v, MARK_LIFT + (raise ? raise(v) : 0));
+  };
 
   const start = Math.min(startGap, distance * 0.35);
   const head = Math.min(headLength, distance * 0.45);
@@ -3354,8 +3356,9 @@ function startBoard() {
     if (target && (commands(piece) || moving)) {
       const r = radiusMm();
       const width = markWidthMm();
+      const overCliffs = climbs(piece) ? (v) => cliffTopAt(v) / r : null;
       piece.arrow = new THREE.Mesh(
-        arrowGeometry(piece.up, target, 6 / r, width / 2 / r, (width * 3.2) / r),
+        arrowGeometry(piece.up, target, 6 / r, width / 2 / r, (width * 3.2) / r, overCliffs),
         !piece.plan && (piece.fire || piece.flameAt) ? blastPaint : arrowPaint[piece.team]
       );
       globe.add(piece.arrow);
@@ -3365,7 +3368,7 @@ function startBoard() {
       }
       const extra = (from, to, paint) => {
         if (mmBetween(from, to) < 12) return;
-        const arrow = new THREE.Mesh(arrowGeometry(from, to, 2 / r, width / 2 / r, (width * 3.2) / r), paint);
+        const arrow = new THREE.Mesh(arrowGeometry(from, to, 2 / r, width / 2 / r, (width * 3.2) / r, overCliffs), paint);
         globe.add(arrow);
         piece.extraArrows.push(arrow);
       };
@@ -3620,8 +3623,53 @@ function startBoard() {
   /* Faces the piece along `forward` and stands it on `up`. */
   function poseOnSphere(piece) {
     const right = new THREE.Vector3().crossVectors(piece.up, piece.forward);
-    piece.mesh.position.copy(piece.up).multiplyScalar(1 + groundLift(piece.up) + (climbs(piece) ? cliffTopAt(piece.up) / radiusMm() : 0));
-    piece.mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, piece.up, piece.forward));
+    piece.mesh.position.copy(piece.up).multiplyScalar(1 + groundLift(piece.up));
+    if (!climbs(piece)) {
+      piece.mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, piece.up, piece.forward));
+      return;
+    }
+    /* Rock Climber: up on the cliff it stands at the cliff's height. Climbing, it tips nose
+       up (or down) about its tail, and the tail slides to the wall, so it goes up the face. */
+    if (!(piece.move && piece.move.facing)) settlePerch(piece);
+    const r = radiusMm();
+    const pitch = piece.pitch || 0;
+    const half = (PIECE_LENGTH_MM / 2) * (piece.size || 1) / r;
+    const nose = piece.forward.clone().multiplyScalar(Math.cos(pitch)).addScaledVector(piece.up, Math.sin(pitch));
+    const top = piece.up.clone().multiplyScalar(Math.cos(pitch)).addScaledVector(piece.forward, -Math.sin(pitch));
+    piece.mesh.position.addScaledVector(piece.up, (piece.perch || 0) / r);
+    /* going up: the tail slides forward to the wall and the body stands up from it;
+       going down: the nose is at the bottom, the body above it */
+    if (pitch >= 0) piece.mesh.position.addScaledVector(piece.forward, -half + 2 * half * Math.sin(pitch)).addScaledVector(nose, half);
+    else piece.mesh.position.addScaledVector(piece.up, -half * Math.sin(pitch));
+    piece.mesh.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, top, nose));
+  }
+  /* A climber that isn't climbing stands on whatever is under it: the cliff top, or the
+     ground. Just past the brink, still holding on with its nose, it stays up. */
+  function settlePerch(piece) {
+    const r = radiusMm();
+    const under = cliffTopAt(piece.up);
+    const nose = piece.up.clone().addScaledVector(piece.forward, (PIECE_LENGTH_MM / 2) * (piece.size || 1) / r).normalize();
+    const perch = piece.perch || 0;
+    piece.perch = perch > under && cliffTopAt(nose) >= perch - 0.05 ? perch : under;
+    piece.pitch = 0;
+    piece.climbing = 0;
+  }
+  /* One slice of a climber's move: straight up a wall its nose has reached, straight down
+     once nothing holds it up, or nothing to climb. True while it is climbing, so it doesn't
+     crawl forward in this slice. */
+  function climbStep(piece, seconds) {
+    const r = radiusMm();
+    const nose = cliffTopAt(piece.up.clone().addScaledVector(piece.forward, (PIECE_LENGTH_MM / 2) * (piece.size || 1) / r).normalize());
+    const support = Math.max(nose, cliffTopAt(piece.up));
+    const perch = piece.perch || 0;
+    const speed = crawlSpeed(piece) * seconds;
+    piece.climbing = nose > perch + 0.05 ? 1 : support < perch - 0.05 ? -1 : 0;
+    if (piece.climbing > 0) piece.perch = Math.min(nose, perch + speed);
+    else if (piece.climbing < 0) piece.perch = Math.max(support, perch - speed);
+    const goal = (piece.climbing * Math.PI) / 2;
+    const pitch = piece.pitch || 0;
+    piece.pitch = pitch + THREE.MathUtils.clamp(goal - pitch, -CLIMB_TIP_SPEED * seconds, CLIMB_TIP_SPEED * seconds);
+    return piece.climbing !== 0;
   }
 
   /* Where a piece is, or will be once its move is done. */
@@ -3637,7 +3685,7 @@ function startBoard() {
     camera.updateMatrixWorld();
     raycaster.setFromCamera(pointer, camera);
     globe.updateMatrixWorld();
-    const onHill = raycaster.intersectObject(groundMesh, false)[0];
+    const onHill = raycaster.intersectObjects([groundMesh, rockMesh, cliffTopMesh], false)[0];
     const hit = onHill ? onHill.point.clone() : raycaster.ray.intersectSphere(ballShape, new THREE.Vector3());
     return hit ? hit.applyQuaternion(globe.quaternion.clone().invert()).normalize() : null;
   }
@@ -3651,7 +3699,7 @@ function startBoard() {
     let best = null;
     let bestGap = reach;
     for (const piece of pieces) {
-      const world = piece.up.clone().multiplyScalar(1 + groundLift(piece.up)).applyQuaternion(globe.quaternion);
+      const world = piece.mesh.position.clone().applyQuaternion(globe.quaternion);
       if (world.dot(camera.position.clone().sub(world)) <= 0) continue;   /* far side */
       const screen = world.clone().project(camera);
       const gap = Math.hypot(
@@ -4209,8 +4257,8 @@ function startBoard() {
      mm the target is below the shooter, and 1 mm less for every mm above. */
   /* Rock Climber: cliffs don't stop the piece. Boulders still do. */
   const climbs = (pose) => !!pose.perks && pose.perks.includes("climber");
-  /* How high a cliff's top stands over the ground at a spot, in mm: 0 off the cliff,
-     rising over its edge to the full height of the top. Boulders can't be climbed. */
+  /* How high a cliff's top stands over the ground at a spot, in mm: 0 off the cliff, the
+     full height anywhere on it. Boulders can't be climbed. */
   function cliffTopAt(v) {
     const r = radiusMm();
     const up = v.clone().normalize();
@@ -4235,7 +4283,7 @@ function startBoard() {
         }
       }
       if (depth <= 0) continue;
-      best = Math.max(best, top * Math.min(1, depth / Math.max(0.5, width * 0.5)));
+      best = Math.max(best, top);
     }
     return best;
   }
@@ -4458,9 +4506,11 @@ function startBoard() {
   }
 
   /* Where a point on the globe lands in the stage, and whether it faces the viewer. */
-  function onStage(point) {
-    const world = point.clone().normalize();
-    world.multiplyScalar(1 + groundLift(world)).applyQuaternion(globe.quaternion);
+  /* `placed`: the point is already where it's drawn (a piece's position), not a spot on the ground. */
+  function onStage(point, placed = false) {
+    const world = point.clone();
+    if (!placed) world.normalize().multiplyScalar(1 + groundLift(world));
+    world.applyQuaternion(globe.quaternion);
     const front = world.dot(camera.position.clone().sub(world)) > 0;
     const seen = world.project(camera);
     return { x: ((seen.x + 1) / 2) * width, y: ((1 - seen.y) / 2) * height, front };
@@ -4469,13 +4519,13 @@ function startBoard() {
   function updateMarks() {
     for (const piece of pieces) {
       /* Offset on screen rather than in 3D, so the tag clears a piece seen from above. */
-      const spot = onStage(piece.up);
+      const spot = onStage(piece.mesh.position, true);
       const lift = Math.max(16, pixelsPerUnit() * pieceScale() * 0.62);
       piece.tag.hidden = !spot.front;
       piece.tag.style.transform = `translate(${spot.x}px, ${spot.y - lift}px)`;
     }
     for (const mark of threatMarks) {
-      const spot = onStage(mark.piece.up);
+      const spot = onStage(mark.piece.mesh.position, true);
       const lift = Math.max(16, pixelsPerUnit() * pieceScale() * 0.62 * (mark.piece.size || 1)) + 14;
       mark.tag.hidden = !spot.front;
       mark.tag.style.transform = `translate(${spot.x}px, ${spot.y - lift}px) translate(-50%, -100%)`;
@@ -5868,7 +5918,7 @@ function startBoard() {
   }
 
   function floatLabel(piece, text, kind) {
-    const spot = onStage(piece.up);
+    const spot = piece.mesh ? onStage(piece.mesh.position, true) : onStage(piece.up);
     if (!spot.front) return;
     const label = document.createElement("div");
     label.className = kind;
@@ -9481,6 +9531,12 @@ function startBoard() {
         if (piece.move.facing) noteTurnOverlaps(piece);
       } else {
         crawled.add(piece);
+        if (climbs(piece) && !piece.digging && climbStep(piece, seconds)) {
+          poseOnSphere(piece);
+          if (!calm.matches) poseCrawl(piece, 1);
+          piece.clock += CRAWL_STEPS * seconds;
+          continue;
+        }
         const step = (crawlSpeed(piece) * seconds) / radiusMm();
         if (step >= remaining - 1e-6) {
           /* Arrived: keep facing the way it was going. */
