@@ -555,7 +555,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
 
     <section class="group">
       <span class="label">Medals of valor</span>
-      <p class="note">A piece earns a medal each time it damages an enemy piece, and each time it blocks an enemy attack by being rolled into a ball. Every 3 medals, it picks a new perk.</p>
+      <p class="note">A piece earns a medal each time it damages an enemy piece, and each time it blocks an enemy attack by being rolled into a ball. Every 3 medals, it picks a new perk. A piece with 3 kills or 9 medals can also pick a special perk.</p>
     </section>
 
     <section class="group">
@@ -913,7 +913,7 @@ function groundMaterial(radiusMm, iceReach, iceStep, colors = GROUND_PAINT) {
         }
       `);
   };
-  return material;
+  return cutHoles(material);
 }
 
 /* ---------- Game piece ---------- */
@@ -974,6 +974,46 @@ const RECUPERATE_HP = 5;
 const SELF_DESTRUCT_SECONDS = 2;
 const EMP_RADIUS_MM = 50;
 const EMP_CHARGE_SECONDS = 0.3;   /* after the piece is a ball */
+const DIVINE_RADIUS_MM = 10;         /* of the laser, and of the hole it leaves */
+const DIVINE_CHARGE_SECONDS = 2;     /* into the turn after the shot */
+const ARENA_RADIUS_MM = 60;          /* Tournament Arc: to the middle of the ring of cliff */
+const ARENA_WIDTH_MM = 5;
+const ARENA_PERKS = ["melee", "tunnel", "double"];   /* lent to the arena's side while inside */
+const ARENA_PAINT = { a: "#d2b183", b: "#8f6c43" };
+const SPECIAL_KILLS = 3;             /* special perks can be picked by a piece with this many kills */
+const SPECIAL_MEDALS = 9;            /* or this many medals of valor */
+/* Holes right through the globe. Ground, rock and everything lying on them is cut away
+   inside each one: a straight tube along the hole's axis, in world space, and its
+   radius in sphere radii (0 for an unused slot). */
+const HOLE_MAX = 16;
+const holeUniform = { value: Array.from({ length: HOLE_MAX }, () => new THREE.Vector4(0, 0, 0, 0)) };
+function cutHoles(material) {
+  const before = material.onBeforeCompile;
+  const key = material.customProgramCacheKey;
+  material.onBeforeCompile = (shader, renderer) => {
+    if (before) before.call(material, shader, renderer);
+    shader.uniforms.uHoles = holeUniform;
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vHoleP;")
+      .replace("#include <project_vertex>", `#include <project_vertex>
+        vec4 holeAt = vec4(transformed, 1.0);
+        #ifdef USE_INSTANCING
+          holeAt = instanceMatrix * holeAt;
+        #endif
+        vHoleP = (modelMatrix * holeAt).xyz;`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", `#include <common>\nuniform vec4 uHoles[${HOLE_MAX}];\nvarying vec3 vHoleP;`)
+      .replace("void main() {", `void main() {
+        for (int i = 0; i < ${HOLE_MAX}; i++) {
+          vec4 hole = uHoles[i];
+          if (hole.w <= 0.0) continue;
+          vec3 off = vHoleP - dot(vHoleP, hole.xyz) * hole.xyz;
+          if (dot(off, off) < hole.w * hole.w) discard;
+        }`);
+  };
+  material.customProgramCacheKey = () => (key ? key.call(material) : "") + "|holes";
+  return material;
+}
 const SELF_DESTRUCT_BANDS = [
   { within: 15, damage: 50, ball: 0 },
   { within: 25, damage: 40, ball: 0 },
@@ -1033,6 +1073,8 @@ const PERKS = [
   { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: while the piece is moving, nothing but a cannon shell, a Self Destruct or the ice can hurt it. Then it needs 3 turns before it can be used again." },
   { id: "tamer", type: "fire", cools: 2, name: "Beetle Tamer", text: "If this turn's shell hits a beetle, you control that beetle next turn: pick it and send it charging, up to 45 mm. It won't ram your own pieces or hold a grudge for the shot. Then it needs 2 turns before it can be used again." },
   { id: "emp", type: "ball", cools: 2, name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work. Then it needs 2 turns before it can be used again." },
+  { id: "divine", type: "fire", special: true, cools: 2, name: "Divine Destruction", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. The cannon fires as usual, and leaves a glowing circle where the shell lands and another straight through the globe from there. Next turn, 2 seconds in, a white laser drives through both circles and the whole globe between. Every piece in it, balls and diggers too, is erased, and it leaves a hole 20 mm wide that nothing can cross, not even by tunneling. Then it needs 2 turns before it can be used again." },
+  { id: "arena", type: "ball", special: true, cools: 3, name: "Tournament Arc", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a ring of cliff 5 mm wide rises 60 mm out from the piece, and stays for the rest of the game. Anything standing where it rises is pushed off it, unhurt. From next turn on, this piece and any teammates inside the ring have Melee, Tunneling and Double Move, with no wait between uses. A piece that didn't have them loses them again once it's outside the ring. Then it needs 3 turns before it can be used again." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
 const BIG_RADIUS_MM = BLAST_RADIUS_MM * 2;
@@ -1819,6 +1861,33 @@ function makeCliffChain(shape, rand) {
   return [...tail, ...nodes, ...head];
 }
 
+/* Tournament Arc: a closed ring of cliff round the formation's centre, all one width,
+   its top stepping up and down in blocks like any cliff. The last nodes repeat the first
+   ones, so the ring closes without a seam. */
+function makeArenaRing(rand) {
+  const around = 2 * Math.PI * ARENA_RADIUS_MM;
+  const steps = Math.ceil(around / 3.5);
+  const rise = randomWave(rand, around, 38);
+  const nodes = [];
+  let level = 1;
+  let blockLeft = 0;
+  for (let i = 0; i < steps; i++) {
+    const t = i / steps;
+    if (blockLeft-- <= 0) {
+      level = 0.75 + rand() * 0.5;
+      blockLeft = 1 + Math.floor(rand() * 5);
+    }
+    nodes.push({
+      x: ARENA_RADIUS_MM * Math.cos(t * Math.PI * 2),
+      y: ARENA_RADIUS_MM * Math.sin(t * Math.PI * 2),
+      width: ARENA_WIDTH_MM / 2,
+      height: 11 * level * (1 + 0.25 * rise(t)),
+    });
+  }
+  nodes.push({ ...nodes[0] }, { ...nodes[1] });
+  return nodes;
+}
+
 /* Picks a kind. Cliffs get a path of nodes; the rest get stones packed along theirs. */
 function makeRockStones(rand, size) {
   let pick = rand();
@@ -2332,6 +2401,7 @@ function startBoard() {
         diffuseColor.rgb = mix(diffuseColor.rgb, rockIce, rockFrozen);
       `);
   };
+  cutHoles(rockMesh.material);
   globe.add(rockMesh);
 
   scene.add(new THREE.HemisphereLight(0xfff4e0, 0x24424c, 0.5));
@@ -2662,6 +2732,10 @@ function startBoard() {
     drawSquad();
     showSwords();
     if (flames.length || pieces.some((p) => p.fireFx || p.sparkFx)) needsDraw = true;
+    if (beams.length) {
+      needsDraw = true;
+      pulseBeams(now);
+    }
     for (const piece of pieces) {
       if (piece.fireFx) piece.fireFx.quaternion.copy(globe.quaternion).multiply(piece.mesh.quaternion).invert().multiply(camera.quaternion);
       if (piece.sparkFx) {
@@ -2703,6 +2777,7 @@ function startBoard() {
     }
     if (needsDraw) {
       needsDraw = false;
+      syncHoles();
       renderer.render(scene, camera);
       updateMarks();
     }
@@ -2844,6 +2919,9 @@ function startBoard() {
   const ice = { rock: null, future: null, mark: null, reach: 0, goal: 0, spreads: 0, spread: false, points: [] };
   const tunnels = [];          /* stay on the map until the rocks change */
   const turnState = { number: 1, bumps: 0, hits: 0, kills: 0, blocks: 0, rockStops: 0, mushrooms: 0, frozen: 0, melee: 0 };
+  const arenas = [];           /* Tournament Arc: { up, team, turn, seed }, each a ring of cliff in the rocks list too */
+  const holes = [];            /* Divine Destruction: { up, radius }, right through the globe, for the rest of the game */
+  const beams = [];            /* Divine Destruction lasers still to come or playing out */
   let selected = null;
   let moving = false;
   let orderLeg = "first";      /* which order the next click sets: "first", "second" or "decoy" */
@@ -2857,6 +2935,7 @@ function startBoard() {
   const perkReady = (piece, id) => {
     const perk = PERKS.find((x) => x.id === id) || {};
     if (!perk.passive && emped(piece)) return false;
+    if (ARENA_PERKS.includes(id) && inArena(piece)) return true;   /* Tournament Arc: no wait inside the ring */
     let wait = typeof perk.cools === "number" ? perk.cools : 1;
     /* Hyped: cannon and ball perks wait one turn less */
     if (typeof perk.cools === "number" && (perk.type === "fire" || perk.type === "ball") && piece.perks.includes("hyped")) wait -= 1;
@@ -2875,6 +2954,7 @@ function startBoard() {
   const crawlSpeed = (piece) => (piece.ride ? RAIL_SPEED_MM : CRAWL_SPEED_MM * (perkOn(piece, "double") ? 2 : 1) * (slowed(piece) ? 0.5 : 1) * (piece.team === BEETLE_TEAM ? BEETLE_SPEED : 1));
   const shellMods = (piece) => (piece.plainShot ? { web: false, pierce: false, big: false, puddle: false, pushpull: null, tamer: false } : {
     web: perkOn(piece, "web"), pierce: perkOn(piece, "pierce"), big: perkOn(piece, "big"), puddle: perkOn(piece, "puddle"), tamer: perkOn(piece, "tamer"),
+    divine: perkOn(piece, "divine") && perkReady(piece, "divine"),
     pushpull: perkOn(piece, "pushpull") ? (piece.pushMode === "pull" ? "pull" : "push") : null,
   });
 
@@ -3147,6 +3227,12 @@ function startBoard() {
     for (const ring of rings) {
       group.add(new THREE.Mesh(capGeometry(spot, ring / r - line, ring / r), blastPaint));
     }
+    /* Divine Destruction: where the laser will go through, here and on the far side */
+    if (mods.divine) {
+      for (const end of [spot.clone().normalize(), spot.clone().normalize().negate()]) {
+        group.add(new THREE.Mesh(capGeometry(end, DIVINE_RADIUS_MM / r - line * 1.5, DIVINE_RADIUS_MM / r), divineAimPaint));
+      }
+    }
     return group;
   }
   function removeMark(mark) {
@@ -3155,6 +3241,9 @@ function startBoard() {
     mark.traverse((part) => { if (part.isMesh) part.geometry.dispose(); });
   }
 
+  const divineAimPaint = new THREE.MeshBasicMaterial({
+    color: linear("#fff3c4"), transparent: true, opacity: 0.95, depthWrite: false, side: THREE.DoubleSide,
+  });
   const rollPaint = new THREE.MeshBasicMaterial({
     color: linear("#0a8a86"), transparent: true, opacity: 0.95, depthWrite: false, side: THREE.DoubleSide,
   });
@@ -3355,6 +3444,7 @@ function startBoard() {
       const name = document.createElement("span");
       name.textContent = perk.id === "pain" && painReady(selected) ? `${perk.name}: two shots this turn`
         : perk.id === "pushpull" && perkOn(selected, perk.id) ? `${perk.name}: ${selected.pushMode === "pull" ? "Pull" : "Push"}`
+        : (selected.arenaLent || []).includes(perk.id) ? `${perk.name}: from the arena`
         : perk.passive || ready ? perk.name
         : emped(selected) ? `${perk.name}: recovering from EMP`
         : `${perk.name}: cooling down`;
@@ -3567,6 +3657,7 @@ function startBoard() {
       if (onPiece) continue;
       rocks.push(rock);
     }
+    for (const arena of arenas) rocks.push(arenaRock(arena));
 
     layOutTerrain();
     shapeRocks();
@@ -3664,7 +3755,7 @@ function startBoard() {
     plant.computeVertexNormals();
     return { grass, plant };
   })();
-  const plantPaint = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+  const plantPaint = cutHoles(new THREE.MeshLambertMaterial({ side: THREE.DoubleSide }));
   const plants = { grass: null, plant: null, spots: [] };
   const PLANT_GREENS = ["#5f8a2e", "#6f9a37", "#4f7a28", "#7fa443", "#58803a"];
   const PLANT_FROST = new THREE.Color(linear("#dcefff"));
@@ -4004,6 +4095,7 @@ function startBoard() {
     for (const mouth of tunnels) reseat(mouth);
     for (const mesh of frozen) reseat(mesh);
     if (ice.lastLand && near(ice.lastLand.spot)) { ice.lastLand.key = null; showLastLand(); }
+    if (holes.some((hole) => holeEnds(hole).some(near))) redrawHoles();
     for (const piece of pieces) drawArrow(piece);
     if (selected) drawCircle();
     needsDraw = true;
@@ -4016,13 +4108,32 @@ function startBoard() {
   const cannonReach = (from, to) => FIRE_RANGE_MM + elevation(from) - elevation(to);
   const heightText = (mm) => (Math.abs(mm) < 0.5 ? "level" : `${mm > 0 ? "+" : "\u2212"}${Math.abs(mm).toFixed(0)} mm`);
 
-  /* The room between a piece and the nearest rock in mm. Below zero means touching. */
+  /* The room between a piece and the nearest rock or hole in mm. Below zero means touching. */
   function rockGap(pose) {
+    const stone = stoneGap(pose);
+    return holes.length ? Math.min(stone, holeGap(pose)) : stone;
+  }
+  /* The same for holes alone. A hole has two mouths, one each side of the globe. */
+  function gapToHole(hole, pose) {
     const r = radiusMm();
     const size = pose.size || 1;
     const length = pose.curl > 0.5 ? 0 : (PIECE_LENGTH_MM / 2 - PIECE_HALF_WIDTH_MM) * size;
     let least = Infinity;
-    for (const rock of rocks) {
+    for (const along of length ? [-1, -0.5, 0, 0.5, 1] : [0]) {
+      const point = length ? pose.up.clone().addScaledVector(pose.forward, (along * length) / r).normalize() : pose.up;
+      const angle = point.angleTo(hole.up);
+      least = Math.min(least, Math.min(angle, Math.PI - angle) * r - hole.radius - PIECE_HALF_WIDTH_MM * size);
+    }
+    return least;
+  }
+  const holeGap = (pose) => Math.min(Infinity, ...holes.map((hole) => gapToHole(hole, pose)));
+  /* The same for rock alone, which a digger can go through. */
+  function stoneGap(pose, list = rocks) {
+    const r = radiusMm();
+    const size = pose.size || 1;
+    const length = pose.curl > 0.5 ? 0 : (PIECE_LENGTH_MM / 2 - PIECE_HALF_WIDTH_MM) * size;
+    let least = Infinity;
+    for (const rock of list) {
       if (pose.up.angleTo(rock.up) * r > rock.reach + PIECE_LENGTH_MM + Math.min(least, 60)) continue;
       for (const along of length ? [-1, -0.5, 0, 0.5, 1] : [0]) {
         const point = pose.up.clone().addScaledVector(pose.forward, (along * length) / r).normalize();
@@ -4478,6 +4589,7 @@ function startBoard() {
       if (hasPerk(piece, id) && perkReady(piece, id)) piece.perksOn.add(id);
     }
     if (hasPerk(piece, "emp") && perkReady(piece, "emp") && empWorth(piece)) piece.perksOn.add("emp");
+    if (hasPerk(piece, "arena") && perkReady(piece, "arena") && Math.random() < 0.4) piece.perksOn.add("arena");
   }
   /* An EMP is worth it when it would catch more enemies than teammates. */
   function empWorth(piece) {
@@ -4496,7 +4608,9 @@ function startBoard() {
      is near that line, or close enough to where the beetle ends up to be charged next turn. */
   const BOT_BEETLE_CLEAR_MM = 30;
   function beetleLines(piece) {
-    return beetles().filter((b) => !tamedNow(b, piece.team)).map((b) => {
+    /* A Divine Destruction circle is just as bad a place to be next turn. */
+    const lasers = beams.filter((b) => b.stage === "marked").flatMap((b) => holeEnds(b).map((end) => ({ dots: [end], end: null })));
+    return lasers.concat(beetles().filter((b) => !tamedNow(b, piece.team)).map((b) => {
       const end = b.plan || b.up;
       const axis = new THREE.Vector3().crossVectors(b.up, end);
       const span = mmBetween(b.up, end);
@@ -4506,12 +4620,12 @@ function startBoard() {
         for (let k = 1; k <= 6; k++) dots.push(b.up.clone().applyAxisAngle(axis, (span * k) / 6 / radiusMm()));
       }
       return { beetle: b, dots, end: dots[dots.length - 1] };
-    });
+    }));
   }
   /* mm from a spot to the nearest beetle charge line (Infinity with no beetles) */
   const beetleRoom = (lines, spot) => Math.min(Infinity, ...lines.flatMap((line) => line.dots.map((d) => mmBetween(d, spot))));
   const beetleRisky = (lines, spot) => beetleRoom(lines, spot) < BOT_BEETLE_CLEAR_MM
-    || lines.some((line) => mmBetween(line.end, spot) < BEETLE_SIGHT_MM + 5);
+    || lines.some((line) => line.end && mmBetween(line.end, spot) < BEETLE_SIGHT_MM + 5);
 
   /* Get out of a beetle's way: the reachable spot farthest from every charge line, or
      curl up (a ball takes no damage from a beetle) if there is nowhere good to go. */
@@ -4695,6 +4809,9 @@ function startBoard() {
           if (hasPerk(piece, "big") && Math.random() < 0.3 && [landing, piece.fire2].every(wideSafe)) piece.perksOn.add("big");
           if (hasPerk(piece, "puddle") && Math.random() < (ice.rock ? 0.5 : 0.2)) piece.perksOn.add("puddle");
           if (hasPerk(piece, "tamer") && perkReady(piece, "tamer") && nearest.team === BEETLE_TEAM) piece.perksOn.add("tamer");
+          /* Divine Destruction, where it won't catch its own side next turn */
+          const laserSafe = !pieces.some((p) => p.team === piece.team && !p.decoy && [landing, landing.clone().negate()].some((end) => mmBetween(p.up, end) <= DIVINE_RADIUS_MM + 30));
+          if (hasPerk(piece, "divine") && perkReady(piece, "divine") && laserSafe && Math.random() < 0.5) piece.perksOn.add("divine");
           if (hasPerk(piece, "pushpull") && perkReady(piece, "pushpull") && Math.random() < 0.4) {
             piece.perksOn.add("pushpull");
             piece.pushMode = Math.random() < 0.5 ? "push" : "pull";
@@ -5183,6 +5300,7 @@ function startBoard() {
       piece.railLine = null;
       piece.wireLine = null;
     }
+    lendArenaPerks();
     for (const web of [...webs]) {
       if (web.lastTurn < turnState.number) removeWeb(web);
     }
@@ -5261,6 +5379,9 @@ function startBoard() {
       piece.perksOn.clear();
       piece.fire = piece.fire2 = piece.flameAt = null;
     }
+    for (const beam of beams) {
+      if (beam.stage === "marked" && beam.turn <= turnState.number) Object.assign(beam, { stage: "charge", time: 0 });
+    }
     for (const piece of pieces.filter((p) => p.plan && !p.decoy && perkOn(p, "unstoppable") && perkReady(p, "unstoppable"))) {
       usePerk(piece, "unstoppable");
       floatLabel(piece, "Unstoppable", "hit heal");
@@ -5321,9 +5442,10 @@ function startBoard() {
         }
         if (perkOn(piece, "selfdestruct")) piece.boom = { time: 0, glow: null };
         if (perkOn(piece, "emp") && perkReady(piece, "emp") && !piece.decoy) piece.emp = { time: 0 };
+        if (perkOn(piece, "arena") && perkReady(piece, "arena") && !piece.decoy) piece.arenaRise = { time: 0 };
       }
     }
-    moving = movers.length + gunners.length > 0 || pieces.some((p) => p.curl !== p.curlGoal) || !!ice.rock;
+    moving = movers.length + gunners.length > 0 || pieces.some((p) => p.curl !== p.curlGoal) || !!ice.rock || beams.some((b) => b.stage === "charge");
     for (const piece of [...movers, ...gunners]) drawArrow(piece);
     if (moving) say("Orders are playing out.");
     else finishTurn();
@@ -5407,6 +5529,7 @@ function startBoard() {
           addPuddle(shell.target, Math.max(bands.length ? bands[bands.length - 1].within : 0, shell.mods.web ? webRadius(shell.mods) : 0));
         }
         if (shellBands(shell.mods).length) explode(shell.target, shell);
+        if (shell.mods.divine) markDivine(shell.target, shell.shooter);
       }
     }
 
@@ -5479,6 +5602,7 @@ function startBoard() {
     shell.arc = shell.from.angleTo(shell.target);
     if (shell.mods.pushpull) piece.perkTurn.pushpull = turnState.number;
     if (shell.mods.tamer) piece.perkTurn.tamer = turnState.number;
+    if (shell.mods.divine) usePerk(piece, "divine");
     piece.plainShot = false;
     shell.peak = SHELL_ARC * shell.arc;
     shell.life = (shell.arc * r) / SHELL_SPEED_MM + 0.35;
@@ -5551,7 +5675,7 @@ function startBoard() {
     }
     if (piece.fireFx) setOnFire(piece, false);
     if (piece.sparkFx) setSparks(piece, false);
-    piece.emp = null;
+    piece.emp = piece.arenaRise = null;
     if (piece.sword) piece.sword.visible = false;
     if (piece.shot && piece.shot.glow) piece.mesh.remove(piece.shot.glow);
     if (piece.boom && piece.boom.glow) piece.mesh.remove(piece.boom.glow);
@@ -5587,7 +5711,7 @@ function startBoard() {
     const splat = { spot: up.clone(), heading: rand() * Math.PI * 2, team, decoy: piece.decoy, record: piece.record };
     splat.mesh = new THREE.Mesh(
       surfacePatch(splat.spot, SPLAT_SIZE_MM / r, splat.heading),
-      new THREE.MeshLambertMaterial({ map: splatTexture(), transparent: true, depthWrite: false })
+      cutHoles(new THREE.MeshLambertMaterial({ map: splatTexture(), transparent: true, depthWrite: false }))
     );
     globe.add(splat.mesh);
     splats.push(splat);
@@ -6119,7 +6243,7 @@ function startBoard() {
   function puddleMesh(puddle) {
     return new THREE.Mesh(
       surfacePatch(puddle.spot, (puddle.radius * 2) / radiusMm(), puddle.heading),
-      new THREE.MeshStandardMaterial({ map: puddleTexture(puddle.frozen), transparent: true, depthWrite: false, roughness: puddle.frozen ? 0.3 : 0.08, metalness: 0.1 })
+      cutHoles(new THREE.MeshStandardMaterial({ map: puddleTexture(puddle.frozen), transparent: true, depthWrite: false, roughness: puddle.frozen ? 0.3 : 0.08, metalness: 0.1 }))
     );
   }
 
@@ -6231,11 +6355,11 @@ function startBoard() {
     shine: linear("#d6d9dd"),
     spike: linear("#2e3033"),
   };
-  const railMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.55, metalness: 0.35 });
-  const railGlow = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, emissive: 0xc79a1c, emissiveIntensity: 0.9, roughness: 0.5 });
+  const railMaterial = cutHoles(new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.55, metalness: 0.35 }));
+  const railGlow = cutHoles(new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, emissive: 0xc79a1c, emissiveIntensity: 0.9, roughness: 0.5 }));
   /* A decoy's fake track and wire look real to everyone else. Its own side sees them
      as a hologram, like the decoy. */
-  const fakeLinePaint = new THREE.MeshBasicMaterial({ color: linear("#7fd8ff"), transparent: true, opacity: 0.42, depthWrite: false });
+  const fakeLinePaint = cutHoles(new THREE.MeshBasicMaterial({ color: linear("#7fd8ff"), transparent: true, opacity: 0.42, depthWrite: false }));
   const linePaint = (line, real) => (line.fake && line.team === localTeam ? fakeLinePaint : real);
   /* Track inside rock: ridden through, but never stopped on. */
   const underRock = (point) => rockGap({ up: point, forward: tangentPair(point)[0], curl: 1 }) < 0;
@@ -6473,7 +6597,7 @@ function startBoard() {
   /* Laid like track: a line of points behind the piece. A piece touching a stretch takes
      5 damage, once per stretch per turn, but never from the stretch it's laying. */
   const wires = [];              /* { points: [Vector3], owner, mesh } */
-  const wireMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.45, metalness: 0.55 });
+  const wireMaterial = cutHoles(new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.45, metalness: 0.55 }));
   const wirePaint = { strand: linear("#8c9196"), barb: linear("#b3b8bd"), post: [linear("#6b4a2b"), linear("#5a3d22")], postTop: linear("#7d5a36") };
   const WIRE_POST_EVERY = 4;           /* a post at every 4th point, 8 mm apart */
   const WIRE_HEIGHTS = [1.3, 2.4, 3.5];
@@ -6963,7 +7087,7 @@ function startBoard() {
   /* Steel: a cannon kill takes the dead piece's perks too, any the killer lacks. */
   function takeSpoils(killer, victim) {
     if (!hasPerk(killer, "steel") || victim.decoy) return;
-    const taken = victim.perks.filter((id) => gainPerk(killer, id));
+    const taken = ownPerks(victim).filter((id) => gainPerk(killer, id));
     if (!taken.length) return;
     const owner = possessive(killer.team);
     announce(`${owner} piece took its victim's perks: ${taken.map((id) => PERKS.find((perk) => perk.id === id).name).join(", ")}.`);
@@ -6991,6 +7115,10 @@ function startBoard() {
     announce(`${possessive(killer.team)} piece brought down a beetle: ${BEETLE_BOUNTY} perks.`, killer.up);
   }
 
+  /* Special perks: only picked, after a kill or a medal, by a piece with 3 kills or 9 medals. */
+  const specialOpen = (piece) => (piece.record ? piece.record.kills : 0) >= SPECIAL_KILLS || piece.medals >= SPECIAL_MEDALS;
+  const ownPerks = (piece) => piece.perks.filter((id) => !(piece.arenaLent || []).includes(id));
+  const perkPool = (piece, earned = true) => PERKS.filter((perk) => (!hasPerk(piece, perk.id) || (piece.arenaLent || []).includes(perk.id)) && (!perk.special || (earned && specialOpen(piece))));
   function awardPerk(piece, reason = "kill") {
     if (reason === "kill" && piece.record) {
       piece.record.kills++;
@@ -7000,7 +7128,7 @@ function startBoard() {
       perkQueue.push({ piece, mushroom: false, reason });
       return;
     }
-    const fresh = PERKS.filter((perk) => !hasPerk(piece, perk.id));
+    const fresh = perkPool(piece);
     if (fresh.length) grantPerk(piece, fresh[Math.floor(rand() * fresh.length)]);
   }
 
@@ -7011,6 +7139,11 @@ function startBoard() {
 
   /* Adds a perk, and does what some passives do the moment they arrive. */
   function gainPerk(piece, id) {
+    /* one the arena lent it is now its own */
+    if ((piece.arenaLent || []).includes(id)) {
+      piece.arenaLent = piece.arenaLent.filter((x) => x !== id);
+      return true;
+    }
     if (hasPerk(piece, id)) return false;
     piece.perks.push(id);
     piece.tag.classList.add("perked");
@@ -7034,11 +7167,11 @@ function startBoard() {
       floatLabel(heir, "+" + WILL_HP, "hit heal");
       heirs.push(heir);
     }
-    if (dead.perks.length) {
+    if (ownPerks(dead).length) {
       for (const mate of mates) if (hasPerk(mate, "oneforall") && !heirs.includes(mate)) heirs.push(mate);
     }
     for (const heir of heirs) {
-      const passed = dead.perks.filter((id) => gainPerk(heir, id));
+      const passed = ownPerks(dead).filter((id) => gainPerk(heir, id));
       const owner = possessive(heir.team);
       const names = passed.map((id) => PERKS.find((perk) => perk.id === id).name);
       if (names.length || hasPerk(dead, "oneforall")) announce(names.length ? `${owner} piece took up its fallen teammate's perks: ${names.join(", ")}.` : `${owner} piece took up its fallen teammate's will.`);
@@ -7061,7 +7194,7 @@ function startBoard() {
   function offerPerk() {
     while (perkQueue.length) {
       const { piece, mushroom, reason } = perkQueue.shift();
-      const fresh = PERKS.filter((perk) => !hasPerk(piece, perk.id));
+      const fresh = perkPool(piece, !mushroom);
       if (!pieces.includes(piece) || piece.team !== localTeam) continue;   /* the others choose for theirs */
       if (!fresh.length) {
         if (mushroom) {
@@ -7119,8 +7252,14 @@ function startBoard() {
       }
       /* Each type opens like a drop-down, listing what this piece can still take. */
       const lists = [];
-      for (const type of PERK_TYPES) {
-        const options = fresh.filter((perk) => perk.type === type.id);
+      const kills = piece.record ? piece.record.kills : 0;
+      const groups = [
+        { name: "Special perks", text: `For a piece with ${SPECIAL_KILLS} kills or ${SPECIAL_MEDALS} medals of valor.`, options: fresh.filter((perk) => perk.special),
+          locked: !specialOpen(piece) && PERKS.some((perk) => perk.special && !hasPerk(piece, perk.id)) },
+        ...PERK_TYPES.map((type) => ({ ...type, options: fresh.filter((perk) => perk.type === type.id && !perk.special) })),
+      ];
+      for (const type of groups) {
+        const options = type.options;
         const head = document.createElement("button");
         head.type = "button";
         head.className = "perk perk-type";
@@ -7128,7 +7267,9 @@ function startBoard() {
         const name = document.createElement("span");
         name.textContent = type.name;
         const about = document.createElement("small");
-        about.textContent = options.length ? `${type.text} ${options.length} to choose from.` : `${type.text} None available.`;
+        about.textContent = options.length ? `${type.text} ${options.length} to choose from.`
+          : type.locked ? `${type.text} So far: ${kills} ${kills === 1 ? "kill" : "kills"}, ${piece.medals} ${piece.medals === 1 ? "medal" : "medals"}.`
+          : `${type.text} None available.`;
         name.append(document.createElement("br"), about);
         head.append(name);
         head.disabled = !options.length;
@@ -7221,7 +7362,7 @@ function startBoard() {
     const web = { spot: spot.clone(), radius, age: 0, lastTurn: turnState.number + WEB_EXTRA_TURNS, caught: new Set(), heading: Math.random() * Math.PI * 2 };
     web.mesh = new THREE.Mesh(
       surfacePatch(web.spot, (radius * 2) / radiusMm(), web.heading),
-      new THREE.MeshBasicMaterial({ map: webTexture(), transparent: true, opacity: 0, depthWrite: false })
+      cutHoles(new THREE.MeshBasicMaterial({ map: webTexture(), transparent: true, opacity: 0, depthWrite: false }))
     );
     globe.add(web.mesh);
     webs.push(web);
@@ -7306,8 +7447,8 @@ function startBoard() {
     hole: new THREE.SphereGeometry(3.6, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2),
     rim: new THREE.TorusGeometry(3.9, 0.75, 6, 18),
     clod: new THREE.DodecahedronGeometry(0.8),
-    holePaint: new THREE.MeshBasicMaterial({ color: linear("#0e0b08") }),
-    dirtPaint: new THREE.MeshStandardMaterial({ color: linear("#6a4a2c"), roughness: 1, flatShading: true }),
+    holePaint: cutHoles(new THREE.MeshBasicMaterial({ color: linear("#0e0b08") })),
+    dirtPaint: cutHoles(new THREE.MeshStandardMaterial({ color: linear("#6a4a2c"), roughness: 1, flatShading: true })),
   };
   function digTunnelMouth(piece, entering) {
     const r = radiusMm();
@@ -7345,6 +7486,7 @@ function startBoard() {
     for (let i = 0; i < slices; i++) advanceMovers(seconds / slices);
     stepShots(seconds);
     stepBooms(seconds);
+    if (beams.length) stepBeams(seconds);
     if (ghosts.length) stepGhosts(seconds);
     for (const bend of terrain.bends) {
       if (bend.grow >= 1) continue;
@@ -7355,7 +7497,7 @@ function startBoard() {
     needsDraw = true;
     if (flames.length) scorch();
     if (wires.length) snagOnWire();
-    const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.emp || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS);
+    const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.emp || p.arenaRise || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS) || beams.some((b) => b.stage !== "marked");
     if (busy || shells.length || blasts.length || squishes.length || ghosts.length || terrain.bends.some((bend) => bend.grow < 1)) return;
     /* Once everything else is done, the ice spreads, unless the game is already won. */
     if (ice.rock && !ice.spread && sidesLeft() > 1) {
@@ -7678,6 +7820,13 @@ function startBoard() {
   /* Self Destruct: a red glow grows for 2 seconds once the piece is a ball, then it
      blows up. Its own blast doesn't count as its own kill. */
   function stepBooms(seconds) {
+    for (const piece of [...pieces]) {
+      if (!piece.arenaRise || piece.curl < 1) continue;
+      piece.arenaRise.time += seconds;
+      if (piece.arenaRise.time < 0.2) continue;
+      piece.arenaRise = null;
+      raiseArena(piece);
+    }
     for (const piece of pieces) {
       if (!piece.emp || piece.curl < 1) continue;
       piece.emp.time += seconds;
@@ -7713,6 +7862,346 @@ function startBoard() {
     }
   }
 
+  /* ---------- Tournament Arc ---------- */
+  /* A ring of cliff 60 mm round the ball. Inside it, its side fights with Melee,
+     Tunneling and Double Move, lent for as long as each piece stays in. */
+  function arenaRock(arena) {
+    const r = radiusMm();
+    const chain = makeArenaRing(seededRandom(arena.seed));
+    const [e1, e2] = tangentPair(arena.up);
+    const rock = {
+      kind: "arena", arena: true, up: arena.up.clone(), e1, e2, stones: [], chains: [chain],
+      seed: arena.seed, lean: 0.9, reach: ARENA_RADIUS_MM + ARENA_WIDTH_MM, paint: ARENA_PAINT,
+    };
+    rock.points = chain.map((n) => ({ at: rockToSphere(rock, n.x, n.y, r, 0), width: n.width }));
+    return rock;
+  }
+  function raiseArena(piece) {
+    usePerk(piece, "arena");
+    const arena = { up: piece.up.clone().normalize(), team: piece.team, turn: turnState.number, seed: Math.floor(rand() * 1e9) };
+    arenas.push(arena);
+    const rock = arenaRock(arena);
+    rocks.push(rock);
+    shapeRocks((other) => other === rock);
+    for (const mushroom of [...mushrooms]) {
+      if (stoneGap({ up: mushroom.up, forward: mushroom.up, curl: 1 }, [rock]) < MUSHROOM_RADIUS_MM - PIECE_HALF_WIDTH_MM) deleteMushroom(mushroom);
+    }
+    /* whatever stands where the cliff rises is pushed off it, unhurt */
+    let pushed = 0;
+    for (const other of [...pieces]) {
+      if (other.digging || stoneGap(other, [rock]) >= 0) continue;
+      if (other.decoy) {
+        vanish(other);
+        continue;
+      }
+      if (pushOffRing(other, arena, rock)) pushed++;
+    }
+    floatLabel(piece, "Tournament Arc", "hit heal");
+    sound.explosion(0.9, false);
+    announce(`${piece.team === localTeam ? (piece.record ? piece.record.name : "Your piece") : possessive(piece.team) + " piece"} raised a Tournament Arc arena${pushed ? `, pushing ${pushed} piece${pushed === 1 ? "" : "s"} off the cliff` : ""}.`, piece.up);
+  }
+  /* Off whichever side of the ring is nearer: the inner half into the arena, the outer half out. */
+  function pushOffRing(piece, arena, rock) {
+    const r = radiusMm();
+    const axis = new THREE.Vector3().crossVectors(arena.up, piece.up);
+    if (axis.lengthSq() < 1e-12) return false;
+    axis.normalize();
+    if (mmBetween(arena.up, piece.up) < ARENA_RADIUS_MM) axis.negate();
+    for (let mm = 0.5; mm <= 40; mm += 0.5) {
+      const up = piece.up.clone().applyAxisAngle(axis, mm / r);
+      const forward = piece.forward.clone().applyAxisAngle(axis, mm / r);
+      if (stoneGap({ up, forward, curl: piece.curl, size: piece.size }, [rock]) < 0.3) continue;
+      piece.move = null;
+      piece.shove = { axis, left: mm, speed: 40, offRing: true };
+      floatLabel(piece, "Pushed", "hit");
+      return true;
+    }
+    return false;
+  }
+  const inArena = (piece) => piece.team !== BEETLE_TEAM && !piece.decoy
+    && arenas.some((a) => a.team === piece.team && a.turn < turnState.number && mmBetween(a.up, piece.up) < ARENA_RADIUS_MM - ARENA_WIDTH_MM / 2);
+  /* At the start of each turn: inside, a piece is lent whichever of the three it lacks;
+     outside, it gives back what it was lent. */
+  function lendArenaPerks() {
+    for (const piece of pieces) {
+      const lent = piece.arenaLent || [];
+      if (inArena(piece)) {
+        const fresh = ARENA_PERKS.filter((id) => !piece.perks.includes(id));
+        if (!fresh.length) continue;
+        piece.perks.push(...fresh);
+        piece.arenaLent = lent.concat(fresh);
+        floatLabel(piece, "Arena", "hit heal");
+      } else if (lent.length) {
+        piece.perks = piece.perks.filter((id) => !lent.includes(id));
+        for (const id of lent) piece.perksOn.delete(id);
+        piece.arenaLent = [];
+      } else continue;
+      piece.tag.classList.toggle("perked", piece.perks.length > 0);
+    }
+    if (selected) drawPerks();
+  }
+
+  /* ---------- Divine Destruction ---------- */
+  /* The shell marks two circles: where it lands and straight through the globe from
+     there. Next turn, 2 seconds in, a white laser drives through both and everything
+     between. Whatever is in it is erased, and it leaves a hole through the planet. */
+  const beamShape = new THREE.CylinderGeometry(1, 1, 1, 32, 1, true);
+  const BEAM_TOP = 2.8;                /* in sphere radii from the centre, well out in space */
+  const holeEnds = (thing) => [thing.up, thing.up.clone().negate()];
+  function markDivine(spot, shooter) {
+    const beam = { up: spot.clone().normalize(), radius: DIVINE_RADIUS_MM, turn: turnState.number + 1, owner: shooter, ownerTeam: shooter.team, stage: "marked", time: 0 };
+    drawBeamMarks(beam);
+    beams.push(beam);
+    announce("Divine Destruction: next turn a laser goes straight through the globe at the glowing circles.", beam.up);
+  }
+  function drawBeamMarks(beam) {
+    const r = radiusMm();
+    beam.ringPaint = new THREE.MeshBasicMaterial({ color: linear("#fff6d8"), transparent: true, opacity: 0.8, depthWrite: false, side: THREE.DoubleSide });
+    beam.fillPaint = new THREE.MeshBasicMaterial({ color: linear("#fff1b8"), transparent: true, opacity: 0.15, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending });
+    beam.marks = [];
+    for (const end of holeEnds(beam)) {
+      beam.marks.push(new THREE.Mesh(capGeometry(end, (beam.radius - 1) / r, beam.radius / r), beam.ringPaint));
+      beam.marks.push(new THREE.Mesh(capGeometry(end, 0, (beam.radius - 1) / r), beam.fillPaint));
+    }
+    globe.add(...beam.marks);
+  }
+  function dropBeamMarks(beam) {
+    for (const mesh of beam.marks || []) {
+      globe.remove(mesh);
+      mesh.geometry.dispose();
+    }
+    beam.marks = [];
+  }
+  function beamRay(width, color, opacity) {
+    const mesh = new THREE.Mesh(beamShape, new THREE.MeshBasicMaterial({ color: linear(color), transparent: true, opacity, depthWrite: false, blending: THREE.AdditiveBlending }));
+    mesh.userData.width = width;
+    globe.add(mesh);
+    return mesh;
+  }
+  function poseRay(mesh, axis, top, bottom) {
+    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis);
+    mesh.position.copy(axis).multiplyScalar((top + bottom) / 2);
+    mesh.scale.set(mesh.userData.width, Math.max(1e-4, top - bottom), mesh.userData.width);
+  }
+  function dropRay(mesh) {
+    if (!mesh) return;
+    globe.remove(mesh);
+    mesh.material.dispose();
+  }
+  function removeBeam(beam) {
+    dropBeamMarks(beam);
+    for (const key of ["sight", "core", "halo"]) dropRay(beam[key]);
+    if (beam.ringPaint) beam.ringPaint.dispose();
+    if (beam.fillPaint) beam.fillPaint.dispose();
+    beams.splice(beams.indexOf(beam), 1);
+  }
+  function clearBeams() {
+    while (beams.length) removeBeam(beams[0]);
+  }
+  /* The circles pulse while they wait, faster and brighter as the laser charges. */
+  function pulseBeams(now) {
+    for (const beam of beams) {
+      if (!beam.ringPaint) continue;
+      const k = beam.stage === "charge" ? Math.min(1, beam.time / DIVINE_CHARGE_SECONDS) : 0;
+      const wave = 0.5 + 0.5 * Math.sin(now / (beam.stage === "charge" ? 110 - 80 * k : 320));
+      beam.ringPaint.opacity = Math.min(1, 0.55 + 0.35 * wave + 0.1 * k);
+      beam.fillPaint.opacity = 0.1 + 0.12 * wave + 0.5 * k;
+    }
+  }
+  function stepBeams(seconds) {
+    for (const beam of [...beams]) {
+      if (beam.stage === "marked") continue;
+      beam.time += seconds;
+      const width = Math.sin(beam.radius / radiusMm());
+      const surface = 1 + groundLift(beam.up);
+      if (beam.stage === "charge") {
+        /* a thin line of light comes down from space onto the circle */
+        if (!beam.sight) beam.sight = beamRay(width * 0.12, "#ffffff", 0);
+        const k = Math.min(1, beam.time / DIVINE_CHARGE_SECONDS);
+        beam.sight.material.opacity = 0.15 + 0.55 * k;
+        poseRay(beam.sight, beam.up, BEAM_TOP, surface);
+        if (k < 1) continue;
+        dropRay(beam.sight);
+        beam.sight = null;
+        Object.assign(beam, { stage: "beam", time: 0, struck: false });
+        beam.core = beamRay(width * 0.7, "#ffffff", 0.95);
+        beam.halo = beamRay(width * 1.08, "#bfe4ff", 0.4);
+        sound.explosion(1.6, false);
+      }
+      /* the beam shoots down from space and right out the far side */
+      const front = BEAM_TOP - 2 * BEAM_TOP * Math.min(1, beam.time / 0.16);
+      if (!beam.struck && front <= surface) {
+        beam.struck = true;
+        strikeBeam(beam);
+      }
+      const fade = beam.time < 0.6 ? 1 : Math.max(0, 1 - (beam.time - 0.6) / 0.5);
+      const flicker = 0.92 + 0.08 * Math.sin(beam.time * 70);
+      beam.core.material.opacity = 0.95 * fade * flicker;
+      beam.halo.material.opacity = 0.4 * fade;
+      poseRay(beam.core, beam.up, BEAM_TOP, front);
+      poseRay(beam.halo, beam.up, BEAM_TOP, front);
+      if (beam.time >= 1.1) removeBeam(beam);
+    }
+  }
+  /* Everything the laser touches is erased: no splatter, no ghost, balls and diggers too. */
+  function strikeBeam(beam) {
+    const hole = { up: beam.up.clone(), radius: beam.radius };
+    dropBeamMarks(beam);
+    for (const end of holeEnds(beam)) addBlast(end.clone(), beam.radius * 1.6, 0.9, true, { ball: "#ffffff", floor: "#fff3c4" });
+    let erased = 0, yours = 0;
+    for (const piece of pieces.filter((p) => gapToHole(hole, p) < 0)) {
+      if (!pieces.includes(piece)) continue;
+      if (piece.decoy) {
+        vanish(piece);
+        continue;
+      }
+      erased++;
+      if (piece.team === localTeam) yours++;
+      erase(piece, beam);
+    }
+    addHole(hole);
+    announce(!erased ? "Divine Destruction: the laser went through the globe and left a hole."
+      : yours ? `Divine Destruction erased ${yours === 1 ? "a piece" : yours + " pieces"} of yours${erased > yours ? `, and ${erased - yours} more` : ""}.`
+      : `Divine Destruction erased ${erased} piece${erased === 1 ? "" : "s"}.`, beam.up);
+  }
+  function erase(piece, beam) {
+    const { team } = piece;
+    piece.hp = 0;
+    floatLabel(piece, "Erased", "hit");
+    turnState.hits++;
+    turnState.kills++;
+    removePiece(piece);
+    handDown(piece);
+    noteIfOut(team);
+    const owner = beam.owner;
+    if (team === beam.ownerTeam) return;
+    if (pieces.includes(owner)) {
+      awardPerk(owner);
+      beetleBounty(owner, piece);
+      takeSpoils(owner, piece);
+    } else creditKill(owner);
+  }
+  /* The hole: cut out of the ground and rock by the shaders, with a wall of dark rock
+     down the inside, glowing at the lip, and scorched ground round each mouth. */
+  const holeWallPaint = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, side: THREE.DoubleSide });
+  const holeLipPaint = new THREE.MeshBasicMaterial({ color: linear("#ffb35c"), transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide });
+  const holeScorchPaint = new THREE.MeshBasicMaterial({ color: linear("#120d09"), transparent: true, opacity: 0.55, depthWrite: false, side: THREE.DoubleSide });
+  function addHole(hole) {
+    holes.push(hole);
+    drawHole(hole);
+    clearUnderHole(hole);
+    needsDraw = true;
+  }
+  function drawHole(hole) {
+    const r = radiusMm();
+    const angle = hole.radius / r;
+    const width = Math.sin(angle);
+    const [u, v] = tangentPair(hole.up);
+    const around = 72;
+    const rows = 24;
+    const positions = [];
+    const colors = [];
+    const index = [];
+    const lip = linear("#8a5634");
+    const rock = linear("#4a3a2c");
+    const deep = linear("#090706");
+    const color = new THREE.Color();
+    for (let i = 0; i <= around; i++) {
+      const spin = (i / around) * Math.PI * 2;
+      const dir = u.clone().multiplyScalar(Math.cos(spin)).addScaledVector(v, Math.sin(spin));
+      /* each end of the wall meets the ground right where the mouth's edge is */
+      const reachOut = (end) => {
+        const rim = end.clone().multiplyScalar(Math.cos(angle)).addScaledVector(dir, Math.sin(angle));
+        const out = 1 + groundLift(rim) + 0.15 / r;
+        return Math.sqrt(Math.max(0, out * out - width * width));
+      };
+      const top = reachOut(hole.up);
+      const bottom = -reachOut(hole.up.clone().negate());
+      for (let j = 0; j <= rows; j++) {
+        const t = top + ((bottom - top) * j) / rows;
+        const point = hole.up.clone().multiplyScalar(t).addScaledVector(dir, width);
+        positions.push(point.x, point.y, point.z);
+        const depth = Math.min(j, rows - j) / (rows / 2);   /* 0 at either mouth, 1 at the centre */
+        if (depth < 0.12) color.copy(lip).lerp(rock, depth / 0.12);
+        else color.copy(rock).lerp(deep, Math.min(1, (depth - 0.12) / 0.5));
+        colors.push(color.r, color.g, color.b);
+      }
+    }
+    for (let i = 0; i < around; i++) {
+      for (let j = 0; j < rows; j++) {
+        const a = i * (rows + 1) + j;
+        const b = (i + 1) * (rows + 1) + j;
+        index.push(a, b, a + 1, b, b + 1, a + 1);
+      }
+    }
+    const shape = new THREE.BufferGeometry();
+    shape.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    shape.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    shape.setIndex(index);
+    shape.computeVertexNormals();
+    hole.meshes = [new THREE.Mesh(shape, holeWallPaint)];
+    for (const end of holeEnds(hole)) {
+      hole.meshes.push(new THREE.Mesh(capGeometry(end, angle, (hole.radius + 0.8) / r, 3), holeLipPaint));
+      hole.meshes.push(new THREE.Mesh(capGeometry(end, (hole.radius + 0.8) / r, (hole.radius + 4) / r, 6), holeScorchPaint));
+    }
+    globe.add(...hole.meshes);
+  }
+  function undrawHole(hole) {
+    for (const mesh of hole.meshes || []) {
+      globe.remove(mesh);
+      mesh.geometry.dispose();
+    }
+    hole.meshes = [];
+  }
+  function redrawHoles() {
+    for (const hole of holes) {
+      undrawHole(hole);
+      drawHole(hole);
+    }
+    needsDraw = true;
+  }
+  function clearHoles() {
+    for (const hole of holes) undrawHole(hole);
+    holes.length = 0;
+    needsDraw = true;
+  }
+  /* What lay on the ground there goes with it. */
+  function clearUnderHole(hole) {
+    const r = radiusMm();
+    const inside = (v, extra = 0) => {
+      const angle = v.clone().normalize().angleTo(hole.up);
+      return Math.min(angle, Math.PI - angle) * r <= hole.radius + extra;
+    };
+    for (const mushroom of [...mushrooms]) if (inside(mushroom.up, MUSHROOM_RADIUS_MM)) deleteMushroom(mushroom);
+    for (const mouth of [...tunnels]) {
+      if (!inside(mouth.position, 3)) continue;
+      globe.remove(mouth);
+      tunnels.splice(tunnels.indexOf(mouth), 1);
+    }
+    for (const mesh of [...frozen]) {
+      if (!inside(mesh.position, PIECE_LENGTH_MM / 2)) continue;
+      globe.remove(mesh);
+      frozen.splice(frozen.indexOf(mesh), 1);
+    }
+    for (const splat of [...splats]) {
+      if (!inside(splat.spot)) continue;
+      splats.splice(splats.indexOf(splat), 1);
+      globe.remove(splat.mesh);
+      splat.mesh.geometry.dispose();
+      splat.mesh.material.map.dispose();
+      splat.mesh.material.dispose();
+    }
+  }
+  /* The shaders cut along each hole's axis in world space, so this follows the globe round. */
+  function syncHoles() {
+    holeUniform.value.forEach((slot, i) => {
+      const hole = holes[i];
+      if (!hole) return slot.set(0, 0, 0, 0);
+      const axis = hole.up.clone().applyQuaternion(globe.quaternion);
+      slot.set(axis.x, axis.y, axis.z, Math.sin(hole.radius / radiusMm()));
+    });
+  }
+
   /* EMP: a shock wave 50 mm round the ball. Pieces it catches that aren't balls lose
      their cannon and perks next turn, and crackle with sparks until then. */
   function empPulse(piece) {
@@ -7739,22 +8228,34 @@ function startBoard() {
   function stopAtRocks(before, crawled) {
     for (const piece of crawled) {
       if (!pieces.includes(piece)) continue;
+      /* A hole through the globe stops anything, digging or riding or rolling. */
+      if (holes.length) {
+        const fall = holeGap(piece);
+        if (fall < 0 && fall < holeGap(before.get(piece))) {
+          Object.assign(piece, before.get(piece));
+          if (piece.digging && piece.digStart && stoneGap(piece) < 0) backOut(piece);
+          stopPiece(piece);
+          turnState.rockStops++;
+          continue;
+        }
+      }
       /* Riding through a tunnel: underground, like a digger, until the track comes out. */
       if (piece.ride) {
-        const inside = rockGap(piece) < 0;
+        const inside = stoneGap(piece) < 0;
         if (inside && !piece.digging) piece.digStart = before.get(piece);
         piece.digging = inside;
         continue;
       }
       const gap = rockGap(piece);
       if (perkOn(piece, "tunnel") && !piece.shove && !piece.tumble) {   /* digging is for moves, not for being knocked or rolling */
-        const inside = gap < 0;
+        const inside = stoneGap(piece) < 0;
         if (inside !== piece.digging) digTunnelMouth(piece, inside);
         if (inside && !piece.digging) piece.digStart = piece.lastClear || piece.moveStart || before.get(piece);
         if (!inside) piece.lastClear = { up: piece.up.clone(), forward: piece.forward.clone(), curl: piece.curl };
         piece.digging = inside;
         continue;
       }
+      if (piece.shove && piece.shove.offRing) continue;   /* sliding off a ring of cliff as it rises */
       if (gap >= 0 && piece.turnOverlap) piece.turnOverlap.rock = false;
       if (gap >= 0 || gap >= rockGap(before.get(piece))) continue;
       if (piece.turnOverlap && piece.turnOverlap.rock) {   /* only overlapping from turning round */
@@ -8024,7 +8525,7 @@ function startBoard() {
       }
       /* A hurt bot piece heals. A healthy one takes a perk if there's one left. How hurt
          counts as hurt depends on its style. */
-      const fresh = PERKS.filter((perk) => !hasPerk(closest, perk.id));
+      const fresh = perkPool(closest, false);
       if (closest.hp <= styleOf(closest.team).healBelow || !fresh.length) healPiece(closest);
       else grantPerk(closest, fresh[Math.floor(rand() * fresh.length)]);
     }
@@ -8162,6 +8663,9 @@ function startBoard() {
     clearPuddles();
     clearTunnels();
     clearIce();
+    clearBeams();
+    clearHoles();
+    arenas.length = 0;
     news.textContent = "";
     for (const splat of splats.splice(0)) {
       globe.remove(splat.mesh);
@@ -8211,6 +8715,11 @@ function startBoard() {
     for (const line of rails) redrawRail(line);   /* sleepers and rails are sized in mm */
     for (const line of wires) redrawWire(line);
     for (const puddle of puddles) redrawPuddle(puddle);
+    redrawHoles();
+    for (const beam of beams) {
+      dropBeamMarks(beam);
+      if (beam.stage === "marked") drawBeamMarks(beam);
+    }
     /* New rocks: the rock that will freeze has to be chosen again. */
     if (ice.future && !ice.rock) {
       ice.future = rocks[Math.floor(rand() * rocks.length)] || null;
@@ -8308,7 +8817,7 @@ function startBoard() {
   /* What isn't game state: meshes and labels, the motion of a turn in progress, and
      links to other things, which are sent as ids instead. */
   const PIECE_SKIP = new Set(["mesh", "tag", "arrow", "aimMark", "aimMark2", "extraArrows", "legs", "antennae", "curlParts",
-    "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "sparkFx", "emp", "rollQ", "flameMark",
+    "bodyDepth", "bodyHeight", "clock", "kick", "move", "shot", "shove", "tumble", "boom", "igloo", "ride", "fireFx", "sparkFx", "emp", "arenaRise", "rollQ", "flameMark",
     "lastClear", "moveStart", "digStart", "railLine", "wireLine", "railRoutes", "rolledInto", "record", "source", "burnBy", "strikeAt", "turnOverlap", "dopeFire", "plainShot", "rammed", "hatMesh", "stopSlice"]);
   function packPiece(piece) {
     const out = {};
@@ -8345,6 +8854,9 @@ function startBoard() {
       mushrooms: mushrooms.filter((m) => !m.gone).map((m) => ({ up: V(m.up), stage: m.stage, turns: m.turns })),
       frozen: frozen.map((mesh) => mesh.userData.frozenData).filter(Boolean),
       bends: terrain.bends.map((bend) => ({ at: V(bend.at), apex: bend.apex })),
+      holes: holes.map((hole) => ({ up: V(hole.up), radius: hole.radius })),
+      arenas: arenas.map((a) => ({ up: V(a.up), team: a.team, turn: a.turn, seed: a.seed })),
+      beams: beams.filter((b) => b.stage === "marked").map((b) => ({ up: V(b.up), radius: b.radius, turn: b.turn, owner: b.owner.id, ownerTeam: b.ownerTeam })),
       ice: { rock: ice.rock ? rocks.indexOf(ice.rock) : -1, future: ice.future ? rocks.indexOf(ice.future) : -1, reach: ice.reach, goal: ice.goal, spreads: ice.spreads, steps: iceSteps },
       picks,
     };
@@ -8414,7 +8926,7 @@ function startBoard() {
       for (const data of snap.splats) {
         const sp = { spot: toV(data.spot), heading: data.heading, team: data.team, decoy: data.decoy, record: roster[data.record] || null };
         sp.mesh = new THREE.Mesh(surfacePatch(sp.spot, SPLAT_SIZE_MM / radiusMm(), sp.heading),
-          new THREE.MeshLambertMaterial({ map: splatTexture(), transparent: true, depthWrite: false }));
+          cutHoles(new THREE.MeshLambertMaterial({ map: splatTexture(), transparent: true, depthWrite: false })));
         globe.add(sp.mesh);
         splats.push(sp);
       }
@@ -8427,7 +8939,7 @@ function startBoard() {
         const web = { spot: toV(data.spot), radius: data.radius, age: WEB_HOLD_SECONDS, lastTurn: data.lastTurn,
           caught: new Set(data.caught.map((id) => wanted.get(id)).filter(Boolean)) };
         web.mesh = new THREE.Mesh(surfacePatch(web.spot, (web.radius * 2) / radiusMm(), Math.random() * Math.PI * 2),
-          new THREE.MeshBasicMaterial({ map: webTexture(), transparent: true, opacity: 1, depthWrite: false }));
+          cutHoles(new THREE.MeshBasicMaterial({ map: webTexture(), transparent: true, opacity: 1, depthWrite: false })));
         globe.add(web.mesh);
         webs.push(web);
       }
@@ -8507,6 +9019,29 @@ function startBoard() {
       refreshGround();
     }
     if (Array.isArray(snap.ice.steps)) setIceSteps(snap.ice.steps);
+    if (!same(here.arenas, snap.arenas || [])) {
+      for (const rock of rocks.filter((x) => x.arena)) rocks.splice(rocks.indexOf(rock), 1);
+      arenas.length = 0;
+      for (const data of snap.arenas || []) {
+        const arena = { up: toV(data.up), team: data.team, turn: data.turn, seed: data.seed };
+        arenas.push(arena);
+        rocks.push(arenaRock(arena));
+      }
+      shapeRocks();
+    }
+    if (!same(here.holes, snap.holes || [])) {
+      clearHoles();
+      for (const data of snap.holes || []) addHole({ up: toV(data.up), radius: data.radius });
+    }
+    if (!same(here.beams, snap.beams || [])) {
+      clearBeams();
+      for (const data of snap.beams || []) {
+        const beam = { up: toV(data.up), radius: data.radius, turn: data.turn, ownerTeam: data.ownerTeam, stage: "marked", time: 0,
+          owner: wanted.get(data.owner) || { id: data.owner, team: data.ownerTeam } };
+        drawBeamMarks(beam);
+        beams.push(beam);
+      }
+    }
     iceReach.value = ice.rock ? ice.reach : -1e5;
     if (ice.rock && ice.mark) {
       ice.mark.remove();
