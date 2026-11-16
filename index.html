@@ -801,9 +801,24 @@ function terrainHeightAt(features, waves, x, y, z, radiusMm) {
   }
   return bentHeight(features.bends, x, y, z, radiusMm, height);
 }
+/* One Punch: inside its slice the ground is cut down to 5 mm below the base line, with
+   steep sides out to the ground around it. Deeper valleys stay as deep as they are. */
+function trenchHeight(punch, x, y, z, radiusMm, height) {
+  const o = punch.origin, a = punch.ahead, s = punch.side;
+  const mm = Math.acos(Math.max(-1, Math.min(1, o.x * x + o.y * y + o.z * z))) * radiusMm;
+  if (mm > PUNCH_RANGE_MM + 12) return height;
+  const angle = Math.abs(Math.atan2(s.x * x + s.y * y + s.z * z, a.x * x + a.y * y + a.z * z));
+  const half = THREE.MathUtils.degToRad(PUNCH_ANGLE_DEG / 2);
+  const out = angle > Math.PI / 2 ? mm : Math.hypot(Math.max(0, angle - half) * mm, Math.max(0, mm - PUNCH_RANGE_MM));
+  return Math.min(height, PUNCH_DEPTH_MM + PUNCH_WALL * out);
+}
 /* Earth bending: a raised cone over the ground, the higher of the two wins. (x, y, z) is a unit direction. */
 function bentHeight(bends, x, y, z, radiusMm, height) {
   for (const bend of bends || []) {
+    if (bend.punch) {
+      height = trenchHeight(bend.punch, x, y, z, radiusMm, height);
+      continue;
+    }
     const d = Math.acos(Math.max(-1, Math.min(1, bend.at.x * x + bend.at.y * y + bend.at.z * z))) * radiusMm;
     const raised = bend.apex * (bend.grow ?? 1) - Math.max(0, d - BEND_TOP_MM) * BEND_GRADE;
     if (raised > height) height = raised;
@@ -986,6 +1001,17 @@ const TRADE_RANGE_MM = 100;          /* Trading Spaces: how far away the other p
 const DASH_DAMAGE = 10;              /* Lightning Dash: to an enemy touching the beam */
 const DASH_KNOCK_MM = 10;
 const DASH_HOLD_SECONDS = 0.8;       /* the turn waits at least this long, so the beam is seen */
+const PUNCH_RANGE_MM = 100;          /* One Punch: how far the blade of light reaches */
+const PUNCH_ANGLE_DEG = 7;           /* its whole width, as an angle at the piece */
+const PUNCH_CORE_MM = 1;             /* this close to its middle line: the full blow */
+const PUNCH_CORE_DAMAGE = 50;
+const PUNCH_DAMAGE = 45;             /* anywhere else in it */
+const PUNCH_KNOCK_MM = 30;           /* and thrown back this far */
+const PUNCH_BALL_KNOCK_MM = 20;      /* a ball takes no damage, but is pushed this far */
+const PUNCH_DEPTH_MM = -5;           /* the ground it hits is cut down to this */
+const PUNCH_WALL = 2;                /* the trench's sides: mm of height for each mm across */
+const PUNCH_GROW_SECONDS = 0.15;     /* it shoots out to full length in this time */
+const PUNCH_HOLD_SECONDS = 1.2;      /* and shines this long */
 const SPECIAL_KILLS = 3;             /* special perks can be picked by a piece with this many kills */
 const SPECIAL_MEDALS = 9;            /* or this many medals of valor */
 /* Holes right through the globe. Ground, rock and everything lying on them is cut away
@@ -1074,7 +1100,7 @@ const PERKS = [
   { id: "pushpull", type: "fire", cools: 2, name: "+/-", text: "Tap to switch it on as Push, tap again for Pull. Every piece the shell hurts is shoved 10 mm straight away from where it lands, or pulled 10 mm toward it; a piece rolled into a ball takes no damage but still moves 5 mm. Then it needs 2 turns before it can be used again." },
   { id: "doping", type: "move", cools: 2, name: "Doping", text: "Costs 10 HP. Give the piece a move, then aim its shot: it moves, then fires from where it ends up, with no cannon perks. Needs more than 10 HP. Then it needs 2 turns before it can be used again." },
   { id: "hyped", type: "passive", passive: true, name: "Hyped", text: "Always on: every cannon and ball perk with a wait after use needs 1 turn less, so a 2-turn wait becomes 1. And each move perk can be used two turns in a row before its wait starts." },
-  { id: "vision", type: "passive", passive: true, special: true, name: "Vision", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Always on: while you plan, a bright red ring marks every enemy that could hurt this piece next turn, with the most damage it could do shown above it. That counts its cannon if it can fire, Flame Thrower, Pain packer, Doping, Melee and Lightning Dash (twice as far with Double Move ready), Barbed Wire, Self Destruct and beetle charges, and only perks that are ready. A Divine Destruction it could aim at you shows as Erase. Click an enemy piece to see all its perks and which are ready." },
+  { id: "vision", type: "passive", passive: true, special: true, name: "Vision", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Always on: while you plan, a bright red ring marks every enemy that could hurt this piece next turn, with the most damage it could do shown above it. That counts its cannon if it can fire, Flame Thrower, Pain packer, Doping, Melee and Lightning Dash (twice as far with Double Move ready), Barbed Wire, One Punch, Self Destruct and beetle charges, and only perks that are ready. A Divine Destruction it could aim at you shows as Erase. Click an enemy piece to see all its perks and which are ready." },
   { id: "secondchance", type: "passive", passive: true, name: "Second Chance", text: "Once: lets the piece fire its cannon two turns in a row, or roll into a ball two turns in a row. The perk is gone as soon as it's used." },
   { id: "indomitable", type: "fire", passive: true, cools: 2, name: "Indomitable Will", text: "Always on: a direct hit on a turn this piece fires its cannon does 49 damage instead of 50. Then it needs 2 turns before it can do that again." },
   { id: "dash", type: "move", special: true, cools: 2, name: "Lightning Dash", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on with a move: the piece is at the end of it in an instant, through other pieces, leaving a glowing beam of light along the way it went. Rock still stops it, unless it can tunnel. Every enemy piece touching the beam, then or later that turn, takes 10 damage (a ball takes none) and is knocked 10 mm away from it. Then it needs 2 turns before it can be used again." },
@@ -1082,6 +1108,7 @@ const PERKS = [
   { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: while the piece is moving, nothing but a cannon shell, a Self Destruct or the ice can hurt it. Then it needs 3 turns before it can be used again." },
   { id: "tamer", type: "fire", cools: 2, name: "Beetle Tamer", text: "If this turn's shell hits a beetle, you control that beetle next turn: pick it and send it charging, up to 45 mm. It won't ram your own pieces or hold a grudge for the shot. Then it needs 2 turns before it can be used again." },
   { id: "emp", type: "ball", cools: 2, name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work. Then it needs 2 turns before it can be used again." },
+  { id: "punch", type: "fire", special: true, cools: 2, name: "One Punch", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then aim inside the red circle. Instead of a shell, the piece throws a blade of white light 100 mm long and 7\u00b0 wide, like the flame's slice. Anything within 1 mm of its middle line takes 50 damage; anything else it touches takes 45 and is thrown 30 mm back. A ball takes no damage, but is pushed 20 mm. Rail road, barbed wire, rock, cliffs, plants, webs, puddles and mushrooms in the slice are erased, and the ground there is cut down to 5 mm below the base line. Then it needs 2 turns before it can be used again." },
   { id: "divine", type: "fire", special: true, cools: 2, name: "Divine Destruction", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. The cannon fires as usual, and leaves a glowing circle where the shell lands and another straight through the globe from there. Next turn, 2 seconds in, a white laser drives through both circles and the whole globe between. The laser is as wide as the shell's whole damage area (40 mm across for a plain shell, wider with Big shell, narrower with Armor Piercing). Every piece in it, balls and diggers too, is erased, and it leaves a hole that wide that nothing can cross, not even by tunneling. Then it needs 2 turns before it can be used again." },
   { id: "arena", type: "ball", special: true, cools: 2, name: "Tournament Arc", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a ring of cliff 5 mm wide rises 60 mm out from the piece, and stays for the rest of the game. Anything standing where it rises is pushed off it, unhurt. From next turn on, this piece and any teammates inside the ring have Melee, Tunneling and Double Move, with no wait between uses. A piece that didn't have them loses them again once it's outside the ring. Then it needs 2 turns before it can be used again." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
@@ -2936,6 +2963,8 @@ function startBoard() {
   const holes = [];            /* Divine Destruction: { up, radius }, right through the globe, for the rest of the game */
   const beams = [];            /* Divine Destruction lasers still to come or playing out */
   const dashes = [];           /* Lightning Dash beams, until the end of the turn */
+  const punches = [];          /* One Punch slices, for the rest of the game: { origin, ahead, side } */
+  const punchFx = [];          /* the blades of light while they shine */
   let selected = null;
   let moving = false;
   let orderLeg = "first";      /* which order the next click sets: "first", "second" or "decoy" */
@@ -2962,7 +2991,10 @@ function startBoard() {
   const perkOn = (piece, id) => piece.perksOn.has(id) || (id === "tunnel" && piece.perks.includes("tunnel"));
   /* The flame is aimed first, when it's on; every other fire click is the cannon. */
   const aimingFlame = (piece) => !!piece && perkOn(piece, "flame") && action === "fire" && orderLeg === "first" && !(perkOn(piece, "doping") && piece.plan);
-  const fireReach = (piece) => (aimingFlame(piece) ? FLAME_RANGE_MM : FIRE_RANGE_MM);
+  /* One Punch takes the place of the first shell, while it's on and ready. Not a doped shot. */
+  const punchOn = (piece) => !!piece && !piece.decoy && !piece.plainShot && perkOn(piece, "punch") && perkReady(piece, "punch");
+  const aimingPunch = (piece) => !!piece && action === "fire" && orderLeg !== "secondShot" && !aimingFlame(piece) && !doping(piece) && punchOn(piece);
+  const fireReach = (piece) => (aimingFlame(piece) ? FLAME_RANGE_MM : aimingPunch(piece) ? PUNCH_RANGE_MM : FIRE_RANGE_MM);
   const slowed = (piece) => turnState.number >= piece.slowFrom && turnState.number <= piece.slowTurn;
   const moveReach = (piece) => (piece.team === BEETLE_TEAM ? BEETLE_MOVE_MM : slowed(piece) ? WEB_MOVE_MM : MOVE_RANGE_MM);
   const crawlSpeed = (piece) => (piece.ride ? RAIL_SPEED_MM : CRAWL_SPEED_MM * (perkOn(piece, "double") ? 2 : 1) * (slowed(piece) ? 0.5 : 1) * (piece.team === BEETLE_TEAM ? BEETLE_SPEED : 1));
@@ -3127,7 +3159,8 @@ function startBoard() {
     const packed = selected && painReady(selected) ? "Pain packer: firing gives two shots this turn. " : "";
     const webbed = selected && slowed(selected) ? `Caught in a web: ${WEB_MOVE_MM} mm at half speed this turn. ` : "";
     const order = medals + packed + webbed + (action === "fire"
-      ? (aimingFlame(selected) ? "Click inside the red circle to aim the flame. Then you can pick a cannon shot too."
+      ? (aimingPunch(selected) ? "One Punch: click inside the red circle to aim it. The blade of light reaches the full 100 mm, 7\u00b0 wide, wherever you click."
+        : aimingFlame(selected) ? "Click inside the red circle to aim the flame. Then you can pick a cannon shot too."
         : orderLeg === "afterFlame" ? "Flame aimed. Click inside the red circle for a cannon shot too, or deselect to skip it."
         : `Click inside the red area to choose where the shell lands. This piece stands ${heightText(elevation(orderFrom()))}: higher ground reaches farther.`)
       : "Click inside the circle to set where this piece goes. Click the piece itself to cancel its order.");
@@ -3192,7 +3225,7 @@ function startBoard() {
     circleEdge.material.color.copy(firing ? linear("#c91f1f") : faking ? linear("#4fbdf0") : linear("#0a9a96"));
     circleFill.geometry.dispose();
     circleEdge.geometry.dispose();
-    if (firing && !aimingFlame(selected)) {
+    if (firing && !aimingFlame(selected) && !aimingPunch(selected)) {
       /* The cannon: shaped by the hills, so drawn wide and trimmed in the shader. */
       circleFill.material = rangeFill;
       circleEdge.material = rangeEdge;
@@ -3298,7 +3331,7 @@ function startBoard() {
       );
       globe.add(piece.arrow);
       if (piece.fire) {
-        piece.aimMark = blastMark(piece.fire, piece.plan ? {} : shellMods(piece));
+        piece.aimMark = !piece.plan && punchOn(piece) ? punchPreview(piece.up, piece.fire) : blastMark(piece.fire, piece.plan ? {} : shellMods(piece));
         globe.add(piece.aimMark);
       }
       const extra = (from, to, paint) => {
@@ -3696,10 +3729,12 @@ function startBoard() {
       rocks.push(rock);
     }
     for (const arena of arenas) rocks.push(arenaRock(arena));
+    for (const punch of punches) cutRocks(punch);
 
     layOutTerrain();
     shapeRocks();
     layOutPlants();
+    for (const punch of punches) erasePlants(punch);
     needsDraw = true;
   }
 
@@ -3989,7 +4024,7 @@ function startBoard() {
     const high = new Float32Array(count);
     const low = new Float32Array(count);
     terrain.length = 0;
-    terrain.bends = [];
+    terrain.bends = punches.map((punch) => ({ punch, grow: 1 }));
     for (const [sign, target, list, other, most, make] of [[1, TERRAIN_HIGH_SHARE, high, low, Math.round(TERRAIN_MAX * 0.6), hill], [-1, TERRAIN_LOW_SHARE, low, high, TERRAIN_MAX, valley]]) {
       let covered = 0;
       for (let tries = 0; tries < (sign > 0 ? 600 : 4000) && covered / count < target && terrain.length < most; tries++) {
@@ -4883,6 +4918,14 @@ function startBoard() {
               piece.flameAt = nearest.up.clone();
             }
           }
+          /* One Punch, straight at it, if no teammate is in the slice */
+          if (hasPerk(piece, "punch") && perkReady(piece, "punch") && gap <= PUNCH_RANGE_MM - 5) {
+            const blow = flameFrame(piece.up, nearest.up);
+            if (!pieces.some((p) => p.team === piece.team && p !== piece && !p.decoy && punchCatch(blow, p).touch)) {
+              piece.perksOn.add("punch");
+              piece.fire = nearest.up.clone();
+            }
+          }
         }
       }
       if (!piece.plan && !piece.fire) {
@@ -5238,7 +5281,7 @@ function startBoard() {
       }
       const inRange = orderLeg === "rail" ? true
         : action === "move" ? distance <= moveReach(selected)
-        : action === "fire" ? distance <= (aimingFlame(selected) ? FLAME_RANGE_MM : cannonReach(orderFrom(), spot))
+        : action === "fire" ? distance <= (aimingFlame(selected) ? FLAME_RANGE_MM : aimingPunch(selected) ? PUNCH_RANGE_MM : cannonReach(orderFrom(), spot))
         : false;
       if (inRange) {
         giveOrder(selected, spot, distance);
@@ -5587,7 +5630,7 @@ function startBoard() {
         if (facing) {
           shot.stage = "charge";
           shot.glow = new THREE.Mesh(glowShape, new THREE.MeshBasicMaterial({
-            color: linear("#ffb13b"), transparent: true, opacity: 0.9, depthWrite: false,
+            color: linear(!piece.flameAt && punchOn(piece) ? "#ffffff" : "#ffb13b"), transparent: true, opacity: 0.9, depthWrite: false,
           }));
           shot.glow.position.set(...piece.mesh.userData.muzzle);
           shot.glow.scale.setScalar(0.005);
@@ -5601,6 +5644,8 @@ function startBoard() {
           if (piece.flameAt) {
             breathe(piece);
             sound.flame();
+          } else if (punchOn(piece)) {
+            throwPunch(piece);
           } else {
             fireShell(piece);
             sound.cannon();
@@ -7584,6 +7629,7 @@ function startBoard() {
     stepShots(seconds);
     stepBooms(seconds);
     if (beams.length) stepBeams(seconds);
+    if (punchFx.length) stepPunches(seconds);
     if (ghosts.length) stepGhosts(seconds);
     for (const bend of terrain.bends) {
       if (bend.grow >= 1) continue;
@@ -7596,7 +7642,7 @@ function startBoard() {
     if (wires.length) snagOnWire();
     for (const dash of dashes) dash.age += seconds;
     if (dashes.length) zapDashes();
-    const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.emp || p.arenaRise || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS) || beams.some((b) => b.stage !== "marked") || dashes.some((d) => d.age < DASH_HOLD_SECONDS);
+    const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.emp || p.arenaRise || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS) || beams.some((b) => b.stage !== "marked") || dashes.some((d) => d.age < DASH_HOLD_SECONDS) || punchFx.length > 0;
     if (busy || shells.length || blasts.length || squishes.length || ghosts.length || terrain.bends.some((bend) => bend.grow < 1)) return;
     /* Once everything else is done, the ice spreads, unless the game is already won. */
     if (ice.rock && !ice.spread && sidesLeft() > 1) {
@@ -7978,6 +8024,7 @@ function startBoard() {
       if (d <= reach) best = Math.max(best, DIRECT_HIT_DAMAGE * (painReady(who) ? 2 : 1) + (hasPerk(who, "flame") && d <= FLAME_RANGE_MM ? FLAME_DAMAGE : 0));
       else if (hasPerk(who, "flame") && d <= FLAME_RANGE_MM) best = Math.max(best, FLAME_DAMAGE);
       if (ready("doping") && who.hp > 10 && d <= moveReach(enemy) + reach) best = Math.max(best, DIRECT_HIT_DAMAGE);
+      if (ready("punch") && d <= PUNCH_RANGE_MM + PIECE_HALF_WIDTH_MM) best = Math.max(best, PUNCH_CORE_DAMAGE);
     }
     if (ready("melee") && d <= move + PIECE_LENGTH_MM) best = Math.max(best, MELEE_DAMAGE);
     if (ready("dash") && d <= move + PIECE_LENGTH_MM) best = Math.max(best, DASH_DAMAGE);
@@ -8083,6 +8130,359 @@ function startBoard() {
       button.append(title, about);
       perkList.appendChild(button);
     }
+  }
+
+  /* ---------- One Punch ---------- */
+  /* Instead of a shell: a blade of white light 100 mm long and 7 degrees wide, out along
+     the ground. It hits everything in it at once, erases what lies on the ground and the
+     rock in its way, and cuts the ground down to 5 mm below the base line. */
+  const punchHalf = () => THREE.MathUtils.degToRad(PUNCH_ANGLE_DEG / 2);
+  /* Whether a point is in the slice, or within `pad` mm of it. */
+  function inPunch(punch, point, pad = 0) {
+    const { mm, angle } = flameSees(punch, point);
+    if (Math.abs(angle) > Math.PI / 2) return mm <= pad;
+    if (mm > PUNCH_RANGE_MM + pad) return false;
+    return Math.max(0, Math.abs(angle) - punchHalf()) * mm <= pad;
+  }
+  /* How a piece is caught: touching the slice at all, and coming within 1 mm of its middle line. */
+  function punchCatch(punch, piece) {
+    const r = radiusMm();
+    const size = piece.size || 1;
+    const half = PIECE_HALF_WIDTH_MM * size;
+    const length = piece.curl > 0.5 ? 0 : (PIECE_LENGTH_MM / 2 - PIECE_HALF_WIDTH_MM) * size;
+    let touch = false, core = false;
+    for (const along of length ? [-1, -0.5, 0, 0.5, 1] : [0]) {
+      const point = piece.up.clone().addScaledVector(piece.forward, (along * length) / r).normalize();
+      const { mm, angle } = flameSees(punch, point);
+      if (Math.abs(angle) > Math.PI / 2 || mm > PUNCH_RANGE_MM + half) continue;
+      if (Math.max(0, Math.abs(angle) - punchHalf()) * mm <= half) touch = true;
+      if (Math.abs(Math.sin(angle)) * mm <= half + PUNCH_CORE_MM) core = true;
+    }
+    return { touch, core: touch && core };
+  }
+  const punchPreviewPaint = new THREE.MeshBasicMaterial({ color: linear("#f4f8ff"), transparent: true, opacity: 0.4, depthWrite: false, side: THREE.DoubleSide });
+  function punchPreview(origin, target) {
+    return new THREE.Mesh(flameGeometry(flameFrame(origin, target), PUNCH_RANGE_MM), punchPreviewPaint);
+  }
+  /* Like firing a shell: the same turn and charge, glowing white, then the blade goes out. */
+  function throwPunch(piece) {
+    piece.mesh.remove(piece.shot.glow);
+    piece.shot.glow.material.dispose();
+    removeMark(piece.aimMark);
+    piece.aimMark = null;
+    usePerk(piece, "punch");
+    const target = mmBetween(piece.up, piece.fire) > 0.5 ? piece.fire : piece.up.clone().addScaledVector(piece.forward, 5 / radiusMm()).normalize();
+    const light = (color, opacity) => new THREE.MeshBasicMaterial({ color: linear(color), transparent: true, opacity, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+    const fx = { punch: flameFrame(piece.up, target), shooter: piece, age: 0, struck: false, meshes: [], core: light("#ffffff", 0.95), halo: light("#bfe4ff", 0.45) };
+    punchFx.push(fx);
+    piece.kick = 1;
+    addBlast(piece.up.clone(), 6, 0.4, false, { ball: "#ffffff", floor: "#bfe4ff" });
+    floatLabel(piece, "One Punch", "hit heal");
+    sound.explosion(1.4, false);
+    piece.shot = null;
+    const next = piece.fire2;   /* Pain packer: a second shot after it, a plain shell */
+    piece.fire2 = null;
+    setAim(piece, next);
+    if (next) piece.shot = { stage: "aim", time: 0, glow: null, second: true };
+    drawPunch(fx, 2);
+  }
+  /* A bright core and a pale halo down the middle, over a sheet of light the shape of the slice. */
+  function drawPunch(fx, length) {
+    for (const mesh of fx.meshes) {
+      globe.remove(mesh);
+      mesh.geometry.dispose();
+    }
+    const r = radiusMm();
+    const line = [];
+    for (let mm = 0; mm <= length + 0.01; mm += Math.max(1, length / 30)) {
+      line.push(onGround(fx.punch.origin.clone().applyAxisAngle(fx.punch.side, mm / r), 1 + 2.5 / r));
+    }
+    const curve = new THREE.CatmullRomCurve3(line);
+    fx.meshes = [
+      new THREE.Mesh(flameGeometry(fx.punch, length), fx.halo),
+      new THREE.Mesh(new THREE.TubeGeometry(curve, 40, 1 / r, 8, false), fx.core),
+      new THREE.Mesh(new THREE.TubeGeometry(curve, 40, 2.6 / r, 10, false), fx.halo),
+    ];
+    globe.add(...fx.meshes);
+    needsDraw = true;
+  }
+  function stepPunches(seconds) {
+    for (const fx of [...punchFx]) {
+      fx.age += seconds;
+      if (!fx.struck) {
+        const length = Math.min(PUNCH_RANGE_MM, (PUNCH_RANGE_MM * fx.age) / PUNCH_GROW_SECONDS);
+        if (length >= PUNCH_RANGE_MM) {
+          fx.struck = true;
+          strikePunch(fx);
+        }
+        drawPunch(fx, Math.max(2, length));
+      }
+      const fade = fx.age < 0.7 ? 1 : Math.max(0, 1 - (fx.age - 0.7) / 0.5);
+      fx.core.opacity = 0.95 * fade * (0.9 + 0.1 * Math.sin(fx.age * 70));
+      fx.halo.opacity = 0.45 * fade;
+      if (fx.age >= PUNCH_HOLD_SECONDS) removePunchFx(fx);
+    }
+  }
+  function removePunchFx(fx) {
+    for (const mesh of fx.meshes) {
+      globe.remove(mesh);
+      mesh.geometry.dispose();
+    }
+    fx.core.dispose();
+    fx.halo.dispose();
+    punchFx.splice(punchFx.indexOf(fx), 1);
+    needsDraw = true;
+  }
+  function clearPunches() {
+    while (punchFx.length) removePunchFx(punchFx[0]);
+    punches.length = 0;
+  }
+  /* The blade at full length: everything in it is hit at once, then the ground goes. */
+  function strikePunch(fx) {
+    const { punch, shooter } = fx;
+    const far = punch.origin.clone().applyAxisAngle(punch.side, PUNCH_RANGE_MM / radiusMm());
+    addBlast(far, 9, 0.6, true, { ball: "#ffffff", floor: "#cfe8ff" });
+    punchPieces(punch, shooter);
+    punches.push(punch);
+    cutRocks(punch);
+    clearPunched(punch);
+    terrain.bends.push({ punch, grow: 1 });
+    refreshGround();
+  }
+  /* 50 within 1 mm of the middle line, 45 anywhere else, and thrown 30 mm back. A ball
+     blocks it and is pushed 20 mm. Any side is hit. One medal for hurting an enemy. */
+  function punchPieces(punch, shooter) {
+    let hurtEnemy = false;
+    for (const piece of [...pieces]) {
+      if (piece === shooter || piece.digging || !pieces.includes(piece)) continue;
+      const caught = punchCatch(punch, piece);
+      if (!caught.touch) continue;
+      if (piece.decoy) {
+        vanish(piece);
+        continue;
+      }
+      const enemy = piece.team !== shooter.team;
+      if (balled(piece)) {
+        turnState.blocks++;
+        showDamage(piece, 0);
+        if (enemy) awardMedal(piece);
+        const struck = piece.strikeTurn;
+        strikeBack(piece, shooter);   /* Rolling Destruction rolls at the shooter instead */
+        if (piece.strikeTurn === struck) nudge(piece, punch.origin, PUNCH_BALL_KNOCK_MM, "push");
+        continue;
+      }
+      let damage = caught.core ? PUNCH_CORE_DAMAGE : PUNCH_DAMAGE;
+      if (damage >= DIRECT_HIT_DAMAGE && piece.perks.includes("indomitable") && piece.firedTurn === turnState.number && perkReady(piece, "indomitable")) {
+        damage = DIRECT_HIT_DAMAGE - 1;
+        piece.perkTurn.indomitable = turnState.number;
+        floatLabel(piece, "Indomitable Will", "hit heal");
+      }
+      if (enemy && piece.team !== BEETLE_TEAM) hurtEnemy = true;
+      if (piece.team === BEETLE_TEAM && shooter.team !== BEETLE_TEAM) {
+        piece.grudgeId = shooter.id;
+        piece.returning = false;
+      }
+      hurt(piece, damage, shooter, true);
+      if (pieces.includes(piece) && piece.hp > 0) nudge(piece, punch.origin, PUNCH_KNOCK_MM, "push");
+    }
+    if (hurtEnemy && pieces.includes(shooter)) awardMedal(shooter);
+  }
+  /* Rock in the slice is gone: whole stones, and the nodes of a cliff, which leaves the
+     cliff in pieces either side. The frozen rock (and the one about to freeze) stays. */
+  function cutRocks(punch) {
+    const r = radiusMm();
+    for (const rock of rocks) {
+      if (rock === ice.rock || rock === ice.future) continue;
+      if (rock.up.angleTo(punch.origin) * r > rock.reach + PUNCH_RANGE_MM + 5) continue;
+      const inside = (x, y, pad) => inPunch(punch, rockToSphere(rock, x, y, r, 0).normalize(), pad);
+      const stones = rock.stones.filter((stone) => !inside(stone.x, stone.y, stone.radius * STONE_REACH));
+      let chains = rock.chains;
+      let cutChain = false;
+      if (chains) {
+        chains = [];
+        for (const nodes of rock.chains) {
+          const runs = [];
+          let run = [];
+          for (const node of nodes) {
+            if (inside(node.x, node.y, node.width)) {
+              if (run.length > 1) runs.push(run);
+              run = [];
+            } else run.push(node);
+          }
+          if (run.length > 1) runs.push(run);
+          if (runs.length === 1 && runs[0].length === nodes.length) chains.push(nodes);   /* untouched: keep it as it is */
+          else {
+            cutChain = true;
+            chains.push(...runs);
+          }
+        }
+      }
+      if (stones.length === rock.stones.length && !cutChain) continue;
+      if (!rock.whole) rock.whole = { stones: rock.stones, chains: rock.chains };
+      rock.stones = stones;
+      rock.chains = chains;
+      restRock(rock);
+    }
+  }
+  function restRock(rock) {
+    const r = radiusMm();
+    const nodes = rock.chains ? rock.chains.flat() : null;
+    rock.points = nodes
+      ? nodes.map((n) => ({ at: rockToSphere(rock, n.x, n.y, r, 0), width: n.width }))
+      : rock.stones.map((n) => ({ at: rockToSphere(rock, n.x, n.y, r, 0), width: n.radius * STONE_REACH }));
+    rock.reach = Math.max(0, ...rock.stones.map((n) => Math.hypot(n.x, n.y) + n.radius * STONE_REACH), ...(nodes || []).map((n) => Math.hypot(n.x, n.y) + n.width));
+    rock.shapeKept = null;
+  }
+  /* Online: the rocks as they were, cut again by every punch so far. */
+  function recutRocks() {
+    for (const rock of rocks) {
+      if (!rock.whole) continue;
+      rock.stones = rock.whole.stones;
+      rock.chains = rock.whole.chains;
+      rock.whole = null;
+      restRock(rock);
+    }
+    for (const punch of punches) {
+      cutRocks(punch);
+      erasePlants(punch);
+    }
+    shapeRocks();
+  }
+  /* Everything lying in the slice goes. Track and wire are cut, leaving the rest. */
+  function clearPunched(punch) {
+    const hit = (v, pad = 0) => inPunch(punch, v.clone().normalize(), pad);
+    for (const mushroom of [...mushrooms]) if (hit(mushroom.up, MUSHROOM_RADIUS_MM)) deleteMushroom(mushroom);
+    for (const mouth of [...tunnels]) {
+      if (!hit(mouth.position, 3)) continue;
+      globe.remove(mouth);
+      tunnels.splice(tunnels.indexOf(mouth), 1);
+    }
+    for (const mesh of [...frozen]) {
+      if (!hit(mesh.position, PIECE_LENGTH_MM / 2)) continue;
+      globe.remove(mesh);
+      frozen.splice(frozen.indexOf(mesh), 1);
+    }
+    for (const splat of [...splats]) {
+      if (!hit(splat.spot, 3)) continue;
+      splats.splice(splats.indexOf(splat), 1);
+      globe.remove(splat.mesh);
+      splat.mesh.geometry.dispose();
+      splat.mesh.material.map.dispose();
+      splat.mesh.material.dispose();
+    }
+    for (const web of [...webs]) if (hit(web.spot, web.radius)) removeWeb(web);
+    for (const puddle of [...puddles]) {
+      if (!hit(puddle.spot, puddle.radius)) continue;
+      puddles.splice(puddles.indexOf(puddle), 1);
+      globe.remove(puddle.mesh);
+      puddle.mesh.geometry.dispose();
+      puddle.mesh.material.map.dispose();
+      puddle.mesh.material.dispose();
+    }
+    const onLine = (q) => hit(q, 2);
+    cutRails(onLine);
+    cutWires(onLine);
+    erasePlants(punch);
+    needsDraw = true;
+  }
+  function erasePlants(punch) {
+    if (!plants.spots) return;
+    const gone = new THREE.Matrix4().makeScale(0, 0, 0);
+    const touched = new Set();
+    plants.spots = plants.spots.filter((spot) => {
+      if (!inPunch(punch, spot.up, 0.5)) return true;
+      spot.mesh.setMatrixAt(spot.index, gone);
+      touched.add(spot.mesh);
+      return false;
+    });
+    for (const mesh of touched) mesh.instanceMatrix.needsUpdate = true;
+  }
+  /* Runs of points either side of a cut, each long enough to draw. */
+  function splitRuns(points, test) {
+    const runs = [];
+    let run = [];
+    for (const q of points) {
+      if (test(q)) {
+        if (run.length > 1) runs.push(run);
+        run = [];
+      } else run.push(q);
+    }
+    if (run.length > 1) runs.push(run);
+    return runs;
+  }
+  function cutWires(test) {
+    for (const line of wires.filter((w) => w.points.some(test))) {
+      const runs = splitRuns(line.points, test);
+      removeWire(line);
+      for (const points of runs) {
+        const part = { points, owner: line.owner, hitBy: new Map(line.hitBy), medalTurn: line.medalTurn };
+        if (line.fake) Object.assign(part, { fake: true, team: line.team });
+        wires.push(part);
+        redrawWire(part);
+      }
+    }
+  }
+  /* Track is cut the same way, keeping the joins between what's left. A piece riding
+     into the cut stops at the last track still there. */
+  function cutRails(test) {
+    const cut = rails.filter((line) => line.points.some(test));
+    if (!cut.length) return;
+    const old = rails.slice();
+    const joins = railJoins.map(([la, ia, lb, ib]) => [old[la], ia, old[lb], ib]);
+    const where = new Map();   /* cut line -> for each old point, [new line, new index] */
+    const fresh = [];
+    for (const line of cut) {
+      const map = [];
+      let run = null;
+      line.points.forEach((q, i) => {
+        if (test(q)) {
+          run = null;
+          return;
+        }
+        if (!run) {
+          run = { points: [] };
+          if (line.fake) Object.assign(run, { fake: true, team: line.team, layer: line.layer });
+          fresh.push(run);
+        }
+        map[i] = [run, run.points.length];
+        run.points.push(q);
+      });
+      where.set(line, map);
+      if (line.mesh) {
+        globe.remove(line.mesh);
+        line.mesh.geometry.dispose();
+      }
+    }
+    const kept = fresh.filter((line) => line.points.length > 1);
+    const lines = old.filter((line) => !where.has(line)).concat(kept);
+    const at = (line, i) => (where.has(line) ? where.get(line)[i] : [line, i]);
+    railJoins.length = 0;
+    for (const [a, ia, b, ib] of joins) {
+      const ends = [at(a, ia), at(b, ib)];
+      if (!ends[0] || !ends[1]) continue;
+      const [na, nb] = ends.map(([line]) => lines.indexOf(line));
+      if (na >= 0 && nb >= 0) railJoins.push([na, ends[0][1], nb, ends[1][1]]);
+    }
+    rails.length = 0;
+    rails.push(...lines);
+    for (const piece of pieces) {
+      if (piece.railLine && where.has(piece.railLine)) piece.railLine = null;
+      if (piece.ride) {
+        const stop = piece.ride.points.findIndex((q, i) => i >= piece.ride.index && test(q));
+        if (stop >= 0) {
+          piece.ride.points = piece.ride.points.slice(0, stop);
+          if (piece.ride.index >= piece.ride.points.length) {
+            piece.digging = false;
+            stopPiece(piece);
+          }
+        }
+      } else if (piece.railPath) {
+        const stop = piece.railPath.findIndex(test);
+        if (stop >= 0) piece.railPath = stop > 1 ? piece.railPath.slice(0, stop) : null;
+      }
+    }
+    for (const line of kept) redrawRail(line);
+    needsDraw = true;
   }
 
   /* ---------- Trading Spaces ---------- */
@@ -9083,6 +9483,7 @@ function startBoard() {
     clearBeams();
     clearHoles();
     clearDashes();
+    clearPunches();
     arenas.length = 0;
     news.textContent = "";
     for (const splat of splats.splice(0)) {
@@ -9229,6 +9630,8 @@ function startBoard() {
   /* ----- packing the game into plain data, and back ----- */
   const V = (v) => [v.x, v.y, v.z];
   const toV = (a) => new THREE.Vector3(a[0], a[1], a[2]);
+  /* Earth bends and One Punch trenches, in the order they were made */
+  const packBends = () => terrain.bends.map((bend) => (bend.punch ? { punch: punches.indexOf(bend.punch) } : { at: V(bend.at), apex: bend.apex }));
   const packValue = (x) => (x instanceof THREE.Vector3 ? { v: V(x) } : x instanceof Set ? { set: [...x] } : Array.isArray(x) ? x.map(packValue) : x);
   const unpackValue = (x) => (Array.isArray(x) ? x.map(unpackValue)
     : x && typeof x === "object" ? (x.v ? toV(x.v) : x.set ? new Set(x.set) : x) : x);
@@ -9271,7 +9674,8 @@ function startBoard() {
         hitBy: [...line.hitBy].filter(([q]) => pieces.includes(q)).map(([q, turn]) => [q.id, turn]), medalTurn: line.medalTurn ?? null })),
       mushrooms: mushrooms.filter((m) => !m.gone).map((m) => ({ up: V(m.up), stage: m.stage, turns: m.turns })),
       frozen: frozen.map((mesh) => mesh.userData.frozenData).filter(Boolean),
-      bends: terrain.bends.map((bend) => ({ at: V(bend.at), apex: bend.apex })),
+      bends: packBends(),
+      punches: punches.map((q) => ({ origin: V(q.origin), ahead: V(q.ahead) })),
       holes: holes.map((hole) => ({ up: V(hole.up), radius: hole.radius })),
       arenas: arenas.map((a) => ({ up: V(a.up), team: a.team, turn: a.turn, seed: a.seed })),
       beams: beams.filter((b) => b.stage === "marked").map((b) => ({ up: V(b.up), radius: b.radius, turn: b.turn, owner: b.owner.id, ownerTeam: b.ownerTeam })),
@@ -9432,11 +9836,21 @@ function startBoard() {
     ice.reach = snap.ice.reach;
     ice.goal = snap.ice.goal;
     ice.spreads = snap.ice.spreads;
-    if (snap.bends && !same(snap.bends, terrain.bends.map((bend) => ({ at: V(bend.at), apex: bend.apex })))) {
-      terrain.bends = snap.bends.map((bend) => ({ at: toV(bend.at), apex: bend.apex, grow: 1 }));
+    const punchesChanged = !same(here.punches || [], snap.punches || []);
+    if (punchesChanged) {
+      punches.length = 0;
+      for (const data of snap.punches || []) {
+        const origin = toV(data.origin), ahead = toV(data.ahead);
+        punches.push({ origin, ahead, side: new THREE.Vector3().crossVectors(origin, ahead) });
+      }
+    }
+    if (snap.bends && !same(snap.bends, packBends())) {
+      terrain.bends = snap.bends.map((bend) => (bend.punch != null ? { punch: punches[bend.punch], grow: 1 } : { at: toV(bend.at), apex: bend.apex, grow: 1 }))
+        .filter((bend) => !("punch" in bend) || bend.punch);
       refreshGround();
     }
     if (Array.isArray(snap.ice.steps)) setIceSteps(snap.ice.steps);
+    const recut = punchesChanged || !same(here.arenas, snap.arenas || []);
     if (!same(here.arenas, snap.arenas || [])) {
       for (const rock of rocks.filter((x) => x.arena)) rocks.splice(rocks.indexOf(rock), 1);
       arenas.length = 0;
@@ -9447,6 +9861,7 @@ function startBoard() {
       }
       shapeRocks();
     }
+    if (recut) recutRocks();
     if (!same(here.holes, snap.holes || [])) {
       clearHoles();
       for (const data of snap.holes || []) addHole({ up: toV(data.up), radius: data.radius });
