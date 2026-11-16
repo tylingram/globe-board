@@ -1225,6 +1225,11 @@ const BOT_STYLES = {
   balanced: { fire: 0.85, roll: 0.12, rollHurt: 0.5, keepAway: 0, melee: 0.6, iceRun: 35, iceWary: 70, hungryHp: 30, perkFoodMoves: 1, healBelow: 30 },
   hunter: { fire: 0.97, roll: 0.04, rollHurt: 0.2, keepAway: 0, melee: 0.95, iceRun: 30, iceWary: 45, hungryHp: 30, perkFoodMoves: 2, healBelow: 15 },
   survivor: { fire: 0.7, roll: 0.3, rollHurt: 0.75, keepAway: 75, melee: 0.25, iceRun: 50, iceWary: 100, hungryHp: 45, perkFoodMoves: 0.6, healBelow: 45 },
+  /* The smart bot: it weighs every option each turn (see smartOrders). These weights won
+     a long tournament of bot games against many different styles. */
+  smart: { fire: 0.85, roll: 0.12, rollHurt: 0.5, keepAway: 0, melee: 0.6, iceRun: 35, iceWary: 70, hungryHp: 30, perkFoodMoves: 1, healBelow: 30,
+    smart: { damage: 1, kill: 20, friendly: 1.5, dodge: 0.8, threat: 0.3, caution: 1, ice: 1, iceSafe: 40, iceDeath: 60, beetle: 25, beetleThreat: 1, beetleHunt: 0.3,
+      range: 10, prefDist: 70, spread: 10, spreadMM: 25, food: 15, foodNear: 5, perkHunger: 0.5, hold: 5, rollBias: 0, pStay: 0.5, pNearest: 0.7, pOther: 0.15, web: 10, unknownPerk: 0.2, perkBias: {} } },
 };
 const BOT_ICE_CLEAR_MM = 30;          /* room it wants left when moving for any other reason */
 const BOT_THINK_MS = [300, 800];      /* always under a second */
@@ -2251,6 +2256,13 @@ function addCliffChain(rock, nodes, radiusMm, positions, colors, tops, rand) {
         face(a, c, d, k);
       }
     }
+  }
+  /* Each end of the run gets a face of its own, so a run cut short (by One Punch or a
+     Tectonic Shift) is solid rock there, not hollow. */
+  for (const i of [0, rows.length - 1]) {
+    const node = nodes[i];
+    const foot = rockToSphere(rock, node.x, node.y, radiusMm, -2);
+    for (let k = 0; k + 1 < across.length; k++) face(foot, rows[i][k], rows[i][k + 1], k);
   }
 }
 
@@ -4897,10 +4909,15 @@ function startBoard() {
       return piece.up.clone().applyAxisAngle(axis, reachMm / radiusMm());
     };
     chooseBeetleMoves();
+    const smartTurn = { chosen: {}, shots: new Map(), nearestOf: null };
     for (const piece of bots()) {
       piece.plan = piece.plan2 = piece.decoyPlan = piece.fire = null;
       piece.roll = false;
       piece.perksOn.clear();
+      if (styleOf(piece.team).smart) {
+        smartOrders(piece, styleOf(piece.team).smart, smartTurn);
+        continue;
+      }
       const reach = moveReach(piece);
       const chosen = chosenBy[piece.team] || (chosenBy[piece.team] = []);
       const enemies = pieces.filter((p) => p.team !== piece.team);
@@ -5035,42 +5052,7 @@ function startBoard() {
         if (!inReach(landing)) landing = nearest.up.clone();
         if (safeTo(landing) && inReach(landing)) {
           piece.fire = landing;
-          if (painReady(piece)) {
-            const other = enemies.find((e) => e !== nearest && mmBetween(piece.up, e.up) <= cannonReach(piece.up, e.up) - 8) || nearest;
-            const second = aimNear(other);
-            if (safeTo(second) && inReach(second)) piece.fire2 = second;
-          }
-          if (hasPerk(piece, "web") && Math.random() < 0.35) piece.perksOn.add("web");
-          if (hasPerk(piece, "pierce") && (nearest.hp <= 25 || Math.random() < 0.2)) piece.perksOn.add("pierce");
-          if (hasPerk(piece, "big") && Math.random() < 0.3 && [landing, piece.fire2].every(wideSafe)) piece.perksOn.add("big");
-          if (hasPerk(piece, "puddle") && Math.random() < (ice.rock ? 0.5 : 0.2)) piece.perksOn.add("puddle");
-          if (hasPerk(piece, "tamer") && perkReady(piece, "tamer") && nearest.team === BEETLE_TEAM) piece.perksOn.add("tamer");
-          /* Divine Destruction, where it won't catch its own side next turn */
-          const laserSafe = !pieces.some((p) => p.team === piece.team && !p.decoy && [landing, landing.clone().negate()].some((end) => mmBetween(p.up, end) <= divineRadius(shellMods(piece)) + 30));
-          if (hasPerk(piece, "divine") && perkReady(piece, "divine") && laserSafe && Math.random() < 0.5) piece.perksOn.add("divine");
-          if (hasPerk(piece, "heart") && perkReady(piece, "heart") && Math.random() < 0.6) piece.perksOn.add("heart");
-          if (hasPerk(piece, "pushpull") && perkReady(piece, "pushpull") && Math.random() < 0.4) {
-            piece.perksOn.add("pushpull");
-            piece.pushMode = Math.random() < 0.5 ? "push" : "pull";
-          }
-          /* Up close, it breathes fire as well, if no teammate is in the way. */
-          if (hasPerk(piece, "flame") && gap <= FLAME_RANGE_MM - 5) {
-            const frame = flameFrame(piece.up, nearest.up);
-            const plume = { ...frame, shooter: piece };
-            const friendly = pieces.some((p) => p.team === piece.team && p !== piece && !p.decoy && inFlame(plume, p));
-            if (!friendly) {
-              piece.perksOn.add("flame");
-              piece.flameAt = nearest.up.clone();
-            }
-          }
-          /* One Punch, straight at it, if no teammate is in the slice */
-          if (hasPerk(piece, "punch") && perkReady(piece, "punch") && gap <= PUNCH_RANGE_MM - 5) {
-            const blow = flameFrame(piece.up, nearest.up);
-            if (!pieces.some((p) => p.team === piece.team && p !== piece && !p.decoy && punchCatch(blow, p).touch)) {
-              piece.perksOn.add("punch");
-              piece.fire = nearest.up.clone();
-            }
-          }
+          botShotPerks(piece, landing, nearest, enemies, gap, heading);
         }
       }
       if (!piece.plan && !piece.fire) {
@@ -5107,6 +5089,247 @@ function startBoard() {
           piece.fire = target;
         }
       }
+    }
+  }
+
+  /* The perks a bot switches on with a shot at `landing`, mostly aimed at `nearest`. */
+  function botShotPerks(piece, landing, nearest, enemies, gap, heading) {
+    const safeTo = (spot) => !pieces.some((p) => p.team === piece.team && !p.decoy && mmBetween(p.up, spot) <= BLAST_RADIUS_MM);
+    const aimNear = (target) => {
+      const side = heading.clone().applyAxisAngle(piece.up, Math.random() * Math.PI * 2);
+      const axis = new THREE.Vector3().crossVectors(target.up, side).normalize();
+      return target.up.clone().applyAxisAngle(axis, (Math.random() * 8) / radiusMm());
+    };
+    const wideSafe = (spot) => !spot || !pieces.some((p) => p.team === piece.team && !p.decoy && mmBetween(p.up, spot) <= BIG_RADIUS_MM);
+    const inReach = (spot) => mmBetween(piece.up, spot) <= cannonReach(piece.up, spot);
+    if (painReady(piece)) {
+      const other = enemies.find((e) => e !== nearest && mmBetween(piece.up, e.up) <= cannonReach(piece.up, e.up) - 8) || nearest;
+      const second = aimNear(other);
+      if (safeTo(second) && inReach(second)) piece.fire2 = second;
+    }
+    if (hasPerk(piece, "web") && Math.random() < 0.35) piece.perksOn.add("web");
+    if (hasPerk(piece, "pierce") && (nearest.hp <= 25 || Math.random() < 0.2)) piece.perksOn.add("pierce");
+    if (hasPerk(piece, "big") && Math.random() < 0.3 && [landing, piece.fire2].every(wideSafe)) piece.perksOn.add("big");
+    if (hasPerk(piece, "puddle") && Math.random() < (ice.rock ? 0.5 : 0.2)) piece.perksOn.add("puddle");
+    if (hasPerk(piece, "tamer") && perkReady(piece, "tamer") && nearest.team === BEETLE_TEAM) piece.perksOn.add("tamer");
+    /* Divine Destruction, where it won't catch its own side next turn */
+    const laserSafe = !pieces.some((p) => p.team === piece.team && !p.decoy && [landing, landing.clone().negate()].some((end) => mmBetween(p.up, end) <= divineRadius(shellMods(piece)) + 30));
+    if (hasPerk(piece, "divine") && perkReady(piece, "divine") && laserSafe && Math.random() < 0.5) piece.perksOn.add("divine");
+    if (hasPerk(piece, "heart") && perkReady(piece, "heart") && Math.random() < 0.6) piece.perksOn.add("heart");
+    if (hasPerk(piece, "pushpull") && perkReady(piece, "pushpull") && Math.random() < 0.4) {
+      piece.perksOn.add("pushpull");
+      piece.pushMode = Math.random() < 0.5 ? "push" : "pull";
+    }
+    /* Up close, it breathes fire as well, if no teammate is in the way. */
+    if (hasPerk(piece, "flame") && gap <= FLAME_RANGE_MM - 5) {
+      const frame = flameFrame(piece.up, nearest.up);
+      const plume = { ...frame, shooter: piece };
+      const friendly = pieces.some((p) => p.team === piece.team && p !== piece && !p.decoy && inFlame(plume, p));
+      if (!friendly) {
+        piece.perksOn.add("flame");
+        piece.flameAt = nearest.up.clone();
+      }
+    }
+    /* One Punch, straight at it, if no teammate is in the slice */
+    if (hasPerk(piece, "punch") && perkReady(piece, "punch") && gap <= PUNCH_RANGE_MM - 5) {
+      const blow = flameFrame(piece.up, nearest.up);
+      if (!pieces.some((p) => p.team === piece.team && p !== piece && !p.decoy && punchCatch(blow, p).touch)) {
+        piece.perksOn.add("punch");
+        piece.fire = nearest.up.clone();
+      }
+    }
+  }
+
+  /* ---------- The smart bot ----------
+     Every turn, each piece scores every option it has: about fifty places to move, a
+     shot at every enemy and every pair of enemies close together, curling up, a Melee
+     charge, or staying put. A set of weights, found by playing many thousands of games
+     between bots of different styles, says what matters how much: damage it can do,
+     shells it would dodge by moving, the damage it could take next turn, room from the
+     ice, beetles, mushrooms, keeping teammates apart and keeping a good distance. */
+  const SMART_HIT = 30;          /* what a shot aimed at a piece that stays put does, on average */
+  /* How much each perk helps a side win, from a study of thousands of bot games. */
+  const PERK_STRENGTH = { barbed: -0.06, big: 0.02, darkarts: 0.01, decoy: 0.18, double: 0.08, easy: 0.03, flame: 0.18, foresight: 0.15, healing: 0.16, icecold: 0.62,
+    igloo: 0.22, melee: 0.28, oneforall: 0.24, pain: 0.05, pierce: 0.03, puddle: -0.15, railroad: 0.36, recuperate: 0.24, rolling: -0.03, selfdestruct: 0.06, steel: 0.18,
+    tunnel: 0.32, web: -0.11, will: 0.3 };
+  function botPerkPick(piece, fresh) {
+    const smart = styleOf(piece.team).smart;
+    if (!smart) return fresh[Math.floor(rand() * fresh.length)];
+    const bias = smart.perkBias || {};
+    const value = (perk) => (PERK_STRENGTH[perk.id] ?? smart.unknownPerk ?? 0.2) + (bias[perk.id] || 0);
+    return fresh.reduce((a, b) => (value(b) > value(a) ? b : a));
+  }
+  function smartOrders(piece, W, turn) {
+    const r = radiusMm();
+    const team = piece.team;
+    const here = piece.up;
+    const reach = moveReach(piece);
+    const chosen = turn.chosen[team] || (turn.chosen[team] = []);
+    const foes = pieces.filter((p) => p.team !== team);
+    const players = foes.filter((p) => p.team !== BEETLE_TEAM);
+    if (!players.length) return;
+    const lines = beetleLines(piece);
+    const caution = 1 + W.caution * (1 - piece.hp / PIECE_HP);
+    const bands = shellBands({});
+    const blast = (d) => { const band = bands.find((b) => d <= b.within); return band ? band.damage : 0; };
+    /* who each piece is most likely to shoot at: its nearest piece of another side */
+    if (!turn.nearestOf) {
+      turn.nearestOf = new Map();
+      for (const e of pieces) {
+        if (e.team === BEETLE_TEAM) continue;
+        let best = null, bestD = Infinity;
+        for (const q of pieces) {
+          if (q.team === e.team || q.team === BEETLE_TEAM) continue;
+          const d = e.up.angleTo(q.up);
+          if (d < bestD) { bestD = d; best = q; }
+        }
+        turn.nearestOf.set(e, best);
+      }
+    }
+    /* Shells likely to land here this turn, if it stays put. */
+    let stayThreat = 0;
+    for (const e of players) {
+      if (!canFire(e) || mmBetween(e.up, here) > cannonReach(e.up, here)) continue;
+      stayThreat += (turn.nearestOf.get(e) === piece ? W.pNearest : W.pOther) * SMART_HIT;
+    }
+    const nextThreat = (spot) => {
+      const target = { up: spot };
+      let t = 0;
+      for (const e of foes) {
+        const th = threatFrom(e, target);
+        if (th) t += Math.min(50, th) * (e.team === BEETLE_TEAM ? W.beetleThreat : 1);
+      }
+      return t;
+    };
+    const food = mushrooms.filter((m) => !m.gone && (m.stage === "open" || m.turns <= 1));
+    const hunger = (PIECE_HP - piece.hp) / PIECE_HP + (piece.perks.length < PERKS.length ? W.perkHunger : 0);
+    const value = (spot) => {
+      let v = 0;
+      const room = iceMargin(spot, piece);
+      if (room < 0) v -= W.iceDeath;
+      v -= W.ice * Math.max(0, W.iceSafe - room);
+      v -= W.threat * caution * nextThreat(spot);
+      if (beetleRisky(lines, spot)) v -= W.beetle;
+      let near = Infinity;
+      for (const e of players) near = Math.min(near, mmBetween(spot, e.up));
+      v -= (W.range * Math.abs(near - W.prefDist)) / 50;
+      for (const c of chosen) {
+        const d = mmBetween(c, spot);
+        if (d < W.spreadMM) v -= W.spread * (1 - d / W.spreadMM);
+      }
+      for (const m of food) {
+        const d = mmBetween(m.up, spot);
+        v += d < 5 ? W.food * hunger : W.foodNear * hunger * Math.max(0, 1 - d / 120);
+      }
+      if (webs.some((w) => mmBetween(w.spot, spot) <= w.radius)) v -= W.web;
+      return v;
+    };
+    const hold = canFire(piece) ? W.hold : 0;   /* a shot not taken now is ready next turn */
+    const base = value(here);
+    const options = [{ kind: "stay", v: base - W.dodge * stayThreat + hold }];
+
+    /* moves: rings of spots, every mushroom in reach, and the best way off the ice */
+    const [a, b] = tangentPair(here);
+    const spots = [];
+    for (let i = 0; i < 16; i++) {
+      const out = a.clone().multiplyScalar(Math.cos((i / 16) * Math.PI * 2)).addScaledVector(b, Math.sin((i / 16) * Math.PI * 2));
+      const axis = new THREE.Vector3().crossVectors(here, out).normalize();
+      for (const k of [0.35, 0.7, 1]) spots.push(here.clone().applyAxisAngle(axis, (reach * k) / r));
+    }
+    for (const m of food) if (mmBetween(here, m.up) <= reach && mmBetween(here, m.up) > 1) spots.push(m.up.clone());
+    if (iceMargin(here, piece) < W.iceSafe + 20) {
+      const away = escapeIce(piece, reach);
+      if (away) spots.push(away);
+    }
+    for (const spot of spots) {
+      if (chosen.some((c) => mmBetween(c, spot) < PIECE_LENGTH_MM * 1.5)) continue;
+      const moved = mmBetween(here, spot);
+      const dodged = moved >= BLAST_RADIUS_MM / 2 ? 0 : stayThreat * (1 - moved / (BLAST_RADIUS_MM / 2));
+      options.push({ kind: "move", spot, v: value(spot) - W.dodge * dodged + hold });
+    }
+    /* Melee: a charge through an enemy it can reach */
+    if (hasPerk(piece, "melee") && perkReady(piece, "melee")) {
+      for (const e of players) {
+        const gap = mmBetween(here, e.up);
+        if (gap <= 8 || gap > reach) continue;
+        const axis = new THREE.Vector3().crossVectors(here, e.up).normalize();
+        const past = here.clone().applyAxisAngle(axis, Math.min(reach, gap + 6) / r);
+        options.push({ kind: "move", spot: past, melee: true, v: value(past) + W.damage * MELEE_DAMAGE * W.pStay + hold });
+      }
+    }
+    /* shots: at each enemy, and between two close together */
+    if (canFire(piece)) {
+      const aims = [];
+      for (const e of foes) {
+        if (e.team === BEETLE_TEAM && !W.beetleHunt) continue;
+        aims.push({ spot: e.up.clone(), target: e });
+        for (const o of foes) {
+          if (o === e || o.team === BEETLE_TEAM || e.team === BEETLE_TEAM || e.id > o.id || mmBetween(e.up, o.up) > 18) continue;
+          aims.push({ spot: e.up.clone().add(o.up).normalize(), target: e });
+        }
+      }
+      for (const aim of aims) {
+        if (mmBetween(here, aim.spot) > cannonReach(here, aim.spot) - 2) continue;
+        let gain = 0, kills = 0, friendly = 0;
+        for (const q of pieces) {
+          if (q.digging) continue;
+          const at = q === piece ? here : q.team === team && q.plan && !q.roll ? q.plan : q.up;
+          const x = blast(mmBetween(aim.spot, at));
+          if (!x) continue;
+          if (q.team === team) { friendly += x; continue; }
+          const beetle = q.team === BEETLE_TEAM;
+          const stay = beetle ? 0.5 : W.pStay;
+          const left = Math.max(0, q.hp - (turn.shots.get(q) || 0));
+          gain += Math.min(x, left) * stay * (beetle ? W.beetleHunt : 1);
+          if (left > 0 && x >= left) kills += stay * (beetle ? W.beetleHunt * 2 : 1);
+        }
+        if (gain <= 0) continue;
+        options.push({ kind: "fire", aim, gain, v: base - W.dodge * stayThreat + W.damage * gain + W.kill * kills - W.friendly * friendly });
+      }
+    }
+    /* curling up: shells and beetles do it no harm */
+    if (canRoll(piece)) {
+      const heal = hasPerk(piece, "recuperate") && perkReady(piece, "recuperate") ? Math.min(RECUPERATE_HP, PIECE_HP - piece.hp) : 0;
+      options.push({ kind: "roll", v: base - W.dodge * stayThreat * 0.1 + W.rollBias + W.damage * heal + hold + (beetleRisky(lines, here) ? W.beetle * 0.8 : 0) });
+    }
+
+    options.sort((x, y) => y.v - x.v);
+    const nearest = players.reduce((x, y) => (here.angleTo(x.up) <= here.angleTo(y.up) ? x : y));
+    const headingTo = (target) => {
+      const h = target.clone().addScaledVector(here, -target.dot(here));
+      return h.lengthSq() > 1e-14 ? h.normalize() : tangentPair(here)[0];
+    };
+    const spotToward = (p, heading, spread, reachMm) => {
+      const aim = heading.clone().applyAxisAngle(p.up, (Math.random() - 0.5) * spread);
+      const axis = new THREE.Vector3().crossVectors(p.up, aim).normalize();
+      return p.up.clone().applyAxisAngle(axis, reachMm / radiusMm());
+    };
+    for (const option of options) {
+      if (option.kind === "move") {
+        const open = (pathIsClear(here, option.spot, piece) || (hasPerk(piece, "tunnel") && restsClear(here, option.spot)))
+          && !routeTouches(piece, here, option.spot);
+        if (!open) continue;
+        piece.plan = option.spot;
+        chosen.push(option.spot);
+        if (option.melee) piece.perksOn.add("melee");
+        botMovePerks(piece, nearest, mmBetween(here, nearest.up), headingTo(nearest.up), spotToward);
+        if (piece.plan) botRide(piece, nearest);
+        return;
+      }
+      if (option.kind === "fire") {
+        const target = option.aim.target;
+        piece.fire = option.aim.spot;
+        turn.shots.set(target, (turn.shots.get(target) || 0) + option.gain);
+        botShotPerks(piece, option.aim.spot, target, foes, mmBetween(here, target.up), headingTo(target.up));
+        chosen.push(here);
+        return;
+      }
+      if (option.kind === "roll") {
+        piece.roll = true;
+        armBall(piece);
+      }
+      chosen.push(here);
+      return;
     }
   }
 
@@ -7430,7 +7653,7 @@ function startBoard() {
       return;
     }
     const fresh = perkPool(piece);
-    if (fresh.length) grantPerk(piece, fresh[Math.floor(rand() * fresh.length)]);
+    if (fresh.length) grantPerk(piece, botPerkPick(piece, fresh));
   }
 
   function grantPerk(piece, perk) {
@@ -9864,7 +10087,7 @@ function startBoard() {
          counts as hurt depends on its style. */
       const fresh = perkPool(closest, false);
       if (closest.hp <= styleOf(closest.team).healBelow || !fresh.length) healPiece(closest);
-      else grantPerk(closest, fresh[Math.floor(rand() * fresh.length)]);
+      else grantPerk(closest, botPerkPick(closest, fresh));
     }
   }
 
