@@ -980,6 +980,9 @@ const ARENA_RADIUS_MM = 60;          /* Tournament Arc: to the middle of the rin
 const ARENA_WIDTH_MM = 5;
 const ARENA_PERKS = ["melee", "tunnel", "double"];   /* lent to the arena's side while inside */
 const ARENA_PAINT = { a: "#d2b183", b: "#8f6c43" };
+const DASH_DAMAGE = 10;              /* Lightning Dash: to an enemy touching the beam */
+const DASH_KNOCK_MM = 10;
+const DASH_HOLD_SECONDS = 0.8;       /* the turn waits at least this long, so the beam is seen */
 const SPECIAL_KILLS = 3;             /* special perks can be picked by a piece with this many kills */
 const SPECIAL_MEDALS = 9;            /* or this many medals of valor */
 /* Holes right through the globe. Ground, rock and everything lying on them is cut away
@@ -1070,6 +1073,7 @@ const PERKS = [
   { id: "hyped", type: "passive", passive: true, name: "Hyped", text: "Always on: every cannon and ball perk with a wait after use needs 1 turn less, so a 2-turn wait becomes 1. And each move perk can be used two turns in a row before its wait starts." },
   { id: "secondchance", type: "passive", passive: true, name: "Second Chance", text: "Once: lets the piece fire its cannon two turns in a row, or roll into a ball two turns in a row. The perk is gone as soon as it's used." },
   { id: "indomitable", type: "fire", passive: true, cools: 2, name: "Indomitable Will", text: "Always on: a direct hit on a turn this piece fires its cannon does 49 damage instead of 50. Then it needs 2 turns before it can do that again." },
+  { id: "dash", type: "move", special: true, cools: 2, name: "Lightning Dash", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on with a move: the piece is at the end of it in an instant, through other pieces, leaving a glowing beam of light along the way it went. Rock still stops it, unless it can tunnel. Every enemy piece touching the beam, then or later that turn, takes 10 damage (a ball takes none) and is knocked 10 mm away from it. Then it needs 2 turns before it can be used again." },
   { id: "unstoppable", type: "move", cools: 3, name: "Unstoppable", text: "Switch on with a move: while the piece is moving, nothing but a cannon shell, a Self Destruct or the ice can hurt it. Then it needs 3 turns before it can be used again." },
   { id: "tamer", type: "fire", cools: 2, name: "Beetle Tamer", text: "If this turn's shell hits a beetle, you control that beetle next turn: pick it and send it charging, up to 45 mm. It won't ram your own pieces or hold a grudge for the shot. Then it needs 2 turns before it can be used again." },
   { id: "emp", type: "ball", cools: 2, name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work. Then it needs 2 turns before it can be used again." },
@@ -2922,6 +2926,7 @@ function startBoard() {
   const arenas = [];           /* Tournament Arc: { up, team, turn, seed }, each a ring of cliff in the rocks list too */
   const holes = [];            /* Divine Destruction: { up, radius }, right through the globe, for the rest of the game */
   const beams = [];            /* Divine Destruction lasers still to come or playing out */
+  const dashes = [];           /* Lightning Dash beams, until the end of the turn */
   let selected = null;
   let moving = false;
   let orderLeg = "first";      /* which order the next click sets: "first", "second" or "decoy" */
@@ -4954,6 +4959,13 @@ function startBoard() {
      sometimes send a fake the other way. */
   function botMovePerks(piece, nearest, gap, heading, spotToward) {
     const reach = moveReach(piece);
+    if (hasPerk(piece, "dash") && perkReady(piece, "dash") && piece.plan) {
+      const axis = new THREE.Vector3().crossVectors(piece.up, piece.plan).normalize();
+      const span = mmBetween(piece.up, piece.plan);
+      const byFoe = pieces.some((e) => e.team !== piece.team && !e.digging && [0.25, 0.5, 0.75, 1].some((t) =>
+        mmBetween(piece.up.clone().applyAxisAngle(axis, (span * t) / radiusMm()), e.up) < PIECE_LENGTH_MM));
+      if (byFoe || Math.random() < 0.25) piece.perksOn.add("dash");
+    }
     if (hasPerk(piece, "tunnel") && !restsClear(piece.up, piece.plan)) piece.plan = digThrough(piece.up, piece.plan);
     if (hasPerk(piece, "double") && perkReady(piece, "double") && iceMargin(piece.up) < styleOf(piece.team).iceRun) {
       const next = escapeIce(piece, reach, piece.plan);
@@ -5301,6 +5313,7 @@ function startBoard() {
       piece.wireLine = null;
     }
     lendArenaPerks();
+    clearDashes();
     for (const web of [...webs]) {
       if (web.lastTurn < turnState.number) removeWeb(web);
     }
@@ -5417,6 +5430,7 @@ function startBoard() {
       piece.moveStart = { up: piece.up.clone(), forward: piece.forward.clone(), curl: piece.curl };
       piece.lastClear = rockGap(piece) >= 0 ? piece.moveStart : null;
     }
+    for (const piece of movers.filter((p) => !p.decoy && perkOn(p, "dash") && perkReady(p, "dash"))) lightningDash(piece);
     for (const piece of gunners) {
       piece.shot = { stage: "aim", time: 0, glow: null };
       secondChance(piece, piece.firedTurn);
@@ -7497,7 +7511,9 @@ function startBoard() {
     needsDraw = true;
     if (flames.length) scorch();
     if (wires.length) snagOnWire();
-    const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.emp || p.arenaRise || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS) || beams.some((b) => b.stage !== "marked");
+    for (const dash of dashes) dash.age += seconds;
+    if (dashes.length) zapDashes();
+    const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.emp || p.arenaRise || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS) || beams.some((b) => b.stage !== "marked") || dashes.some((d) => d.age < DASH_HOLD_SECONDS);
     if (busy || shells.length || blasts.length || squishes.length || ghosts.length || terrain.bends.some((bend) => bend.grow < 1)) return;
     /* Once everything else is done, the ice spreads, unless the game is already won. */
     if (ice.rock && !ice.spread && sidesLeft() > 1) {
@@ -7860,6 +7876,140 @@ function startBoard() {
         turnState.kills++;
       }
     }
+  }
+
+  /* ---------- Lightning Dash ---------- */
+  /* The whole move happens at once, through other pieces, and leaves a beam of light
+     along the way. The beam lasts the turn and knocks back every enemy that touches it. */
+  function dashLeg(piece, from, goal) {
+    const r = radiusMm();
+    const total = mmBetween(from, goal);
+    const axis = new THREE.Vector3().crossVectors(from, goal);
+    if (total < 0.3 || axis.lengthSq() < 1e-12) return { points: [], end: from.clone(), cut: false };
+    axis.normalize();
+    /* a digger goes through rock, but nothing goes through a hole */
+    const gapOf = perkOn(piece, "tunnel") ? holeGap : rockGap;
+    const poseAt = (mm) => {
+      const up = from.clone().applyAxisAngle(axis, mm / r).normalize();
+      return { up, forward: new THREE.Vector3().crossVectors(axis, up).normalize(), curl: 0, size: piece.size };
+    };
+    const points = [];
+    let last = poseAt(0);
+    let lastGap = gapOf(last);
+    for (let mm = 0.5; ; mm += 0.5) {
+      const pose = poseAt(Math.min(mm, total));
+      const gap = gapOf(pose);
+      if (gap < 0 && gap < lastGap) return { points, end: last.up, cut: true };
+      points.push(pose.up);
+      last = pose;
+      lastGap = gap;
+      if (mm >= total) return { points, end: pose.up, cut: false };
+    }
+  }
+  function lightningDash(piece) {
+    usePerk(piece, "dash");
+    const r = radiusMm();
+    const start = piece.up.clone();
+    const path = [start.clone()];
+    for (const goal of [piece.plan, piece.plan2].filter(Boolean)) {
+      const leg = dashLeg(piece, path[path.length - 1], goal);
+      path.push(...leg.points);
+      if (leg.cut) break;
+    }
+    const poseAt = (i) => {
+      const up = path[i];
+      const back = path[Math.max(0, i - 1)];
+      const ahead = i ? up : path[Math.min(path.length - 1, 1)];
+      const way = ahead.clone().sub(i ? back : up);
+      way.addScaledVector(up, -way.dot(up));
+      return { up, forward: way.lengthSq() > 1e-14 ? way.normalize() : piece.forward.clone(), curl: 0, size: piece.size };
+    };
+    /* it can go through pieces but can't stop in one, or inside rock */
+    const others = pieces.filter((p) => p !== piece && !p.decoy);
+    let k = path.length - 1;
+    while (k > 0 && (others.some((o) => pieceGap(poseAt(k), o, r) < 0) || rockGap(poseAt(k)) < 0)) k--;
+    path.length = k + 1;
+    const end = poseAt(k);
+    piece.up = end.up.clone();
+    piece.forward = end.forward.clone();
+    piece.digging = false;
+    stopPiece(piece);
+    floatLabel(piece, "Lightning Dash", "hit heal");
+    const flash = { ball: "#ffffff", floor: "#bfe4ff" };
+    addBlast(start, 4, 0.35, false, flash);
+    addBlast(piece.up.clone(), 5, 0.45, false, flash);
+    sound.explosion(0.35, false);
+    if (path.length < 2) return;
+    const dash = { points: path, owner: piece, ownerTeam: piece.team, hit: new Set(), medalled: false, age: 0 };
+    drawDash(dash);
+    dashes.push(dash);
+    zapDashes();
+  }
+  const dashCore = new THREE.MeshBasicMaterial({ color: linear("#f4fbff"), transparent: true, opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending });
+  const dashHalo = new THREE.MeshBasicMaterial({ color: linear("#6ec3ff"), transparent: true, opacity: 0.4, depthWrite: false, blending: THREE.AdditiveBlending });
+  function drawDash(dash) {
+    const r = radiusMm();
+    const step = Math.max(1, Math.round(4 / 0.5));   /* a control point every 4 mm or so */
+    const spots = dash.points.filter((q, i) => i % step === 0 || i === dash.points.length - 1)
+      .map((q) => onGround(q.clone(), 1 + 1.2 / r));
+    if (spots.length < 2) spots.push(spots[0].clone().multiplyScalar(1.0001));
+    const curve = new THREE.CatmullRomCurve3(spots);
+    const segments = Math.max(8, spots.length * 4);
+    dash.meshes = [
+      new THREE.Mesh(new THREE.TubeGeometry(curve, segments, 0.5 / r, 8, false), dashCore),
+      new THREE.Mesh(new THREE.TubeGeometry(curve, segments, 1.5 / r, 10, false), dashHalo),
+    ];
+    globe.add(...dash.meshes);
+    needsDraw = true;
+  }
+  function clearDashes() {
+    for (const dash of dashes.splice(0)) {
+      for (const mesh of dash.meshes || []) {
+        globe.remove(mesh);
+        mesh.geometry.dispose();
+      }
+    }
+    needsDraw = true;
+  }
+  /* Each enemy touching a beam, once per beam: 10 damage and a 10 mm kick away from it. */
+  function zapDashes() {
+    for (const dash of dashes) {
+      for (const piece of [...pieces]) {
+        if (piece.team === dash.ownerTeam || piece.digging || dash.hit.has(piece)) continue;
+        if (wireGap(piece, dash) > 0) continue;
+        dash.hit.add(piece);
+        if (piece.decoy) {
+          vanish(piece);
+          continue;
+        }
+        kickFromDash(piece, dash);
+        floatLabel(piece, "Lightning", "hit");
+        if (balled(piece)) {
+          showDamage(piece, 0);
+          continue;
+        }
+        if (piece.team !== BEETLE_TEAM && !dash.medalled && pieces.includes(dash.owner)) {
+          dash.medalled = true;
+          awardMedal(dash.owner);
+        }
+        hurt(piece, DASH_DAMAGE, dash.owner);
+      }
+    }
+  }
+  function kickFromDash(piece, dash) {
+    let at = 0;
+    for (let i = 1; i < dash.points.length; i++) {
+      if (dash.points[i].angleTo(piece.up) < dash.points[at].angleTo(piece.up)) at = i;
+    }
+    const near = dash.points[at];
+    const along = dash.points[Math.min(dash.points.length - 1, at + 1)].clone().sub(dash.points[Math.max(0, at - 1)]);
+    const side = new THREE.Vector3().crossVectors(near, along).normalize();
+    const lean = side.dot(piece.up);
+    if (lean < 0) side.negate();
+    side.addScaledVector(piece.up, -side.dot(piece.up));
+    if (side.lengthSq() < 1e-14) return;
+    piece.shove = { axis: new THREE.Vector3().crossVectors(piece.up, side.normalize()).normalize(), left: DASH_KNOCK_MM };
+    piece.knockedTurn = turnState.number;
   }
 
   /* ---------- Tournament Arc ---------- */
@@ -8665,6 +8815,7 @@ function startBoard() {
     clearIce();
     clearBeams();
     clearHoles();
+    clearDashes();
     arenas.length = 0;
     news.textContent = "";
     for (const splat of splats.splice(0)) {
