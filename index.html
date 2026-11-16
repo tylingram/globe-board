@@ -558,7 +558,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
 
     <section class="group">
       <span class="label">Medals of valor</span>
-      <p class="note">A piece earns a medal each time it damages an enemy piece, and each time it blocks an enemy attack by being rolled into a ball. Every 3 medals, it picks a new perk. A piece with 3 kills or 9 medals can also pick a special perk, and with 5 kills or 15 medals a tier 3 special perk.</p>
+      <p class="note">A piece earns a medal each time it damages an enemy piece, and each time it blocks an enemy attack by being rolled into a ball. Every 3 medals, it picks a new perk. A piece with 3 kills or 9 medals can also pick a special perk.</p>
     </section>
 
     <section class="group">
@@ -987,8 +987,6 @@ const DASH_KNOCK_MM = 10;
 const DASH_HOLD_SECONDS = 0.8;       /* the turn waits at least this long, so the beam is seen */
 const SPECIAL_KILLS = 3;             /* special perks can be picked by a piece with this many kills */
 const SPECIAL_MEDALS = 9;            /* or this many medals of valor */
-const TIER3_KILLS = 5;               /* tier 3 special perks need this many kills */
-const TIER3_MEDALS = 15;             /* or this many medals of valor */
 /* Holes right through the globe. Ground, rock and everything lying on them is cut away
    inside each one: a straight tube along the hole's axis, in world space, and its
    radius in sphere radii (0 for an unused slot). */
@@ -1075,7 +1073,7 @@ const PERKS = [
   { id: "pushpull", type: "fire", cools: 2, name: "+/-", text: "Tap to switch it on as Push, tap again for Pull. Every piece the shell hurts is shoved 10 mm straight away from where it lands, or pulled 10 mm toward it; a piece rolled into a ball takes no damage but still moves 5 mm. Then it needs 2 turns before it can be used again." },
   { id: "doping", type: "move", cools: 2, name: "Doping", text: "Costs 10 HP. Give the piece a move, then aim its shot: it moves, then fires from where it ends up, with no cannon perks. Needs more than 10 HP. Then it needs 2 turns before it can be used again." },
   { id: "hyped", type: "passive", passive: true, name: "Hyped", text: "Always on: every cannon and ball perk with a wait after use needs 1 turn less, so a 2-turn wait becomes 1. And each move perk can be used two turns in a row before its wait starts." },
-  { id: "vision", type: "passive", passive: true, special: true, tier: 3, name: "Vision", text: "Tier 3 special perk, only for a piece with 5 kills or 15 medals of valor. Always on: while you plan, a bright red ring marks every enemy that could hurt this piece next turn, with the most damage it could do shown above it. That counts its cannon if it can fire, Flame Thrower, Pain packer, Doping, Melee and Lightning Dash (twice as far with Double Move ready), Barbed Wire, Self Destruct and beetle charges, and only perks that are ready. A Divine Destruction it could aim at you shows as Erase. Click an enemy piece to see all its perks and which are ready." },
+  { id: "vision", type: "passive", passive: true, special: true, name: "Vision", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Always on: while you plan, a bright red ring marks every enemy that could hurt this piece next turn, with the most damage it could do shown above it. That counts its cannon if it can fire, Flame Thrower, Pain packer, Doping, Melee and Lightning Dash (twice as far with Double Move ready), Barbed Wire, Self Destruct and beetle charges, and only perks that are ready. A Divine Destruction it could aim at you shows as Erase. Click an enemy piece to see all its perks and which are ready." },
   { id: "secondchance", type: "passive", passive: true, name: "Second Chance", text: "Once: lets the piece fire its cannon two turns in a row, or roll into a ball two turns in a row. The perk is gone as soon as it's used." },
   { id: "indomitable", type: "fire", passive: true, cools: 2, name: "Indomitable Will", text: "Always on: a direct hit on a turn this piece fires its cannon does 49 damage instead of 50. Then it needs 2 turns before it can do that again." },
   { id: "dash", type: "move", special: true, cools: 2, name: "Lightning Dash", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on with a move: the piece is at the end of it in an instant, through other pieces, leaving a glowing beam of light along the way it went. Rock still stops it, unless it can tunnel. Every enemy piece touching the beam, then or later that turn, takes 10 damage (a ball takes none) and is knocked 10 mm away from it. Then it needs 2 turns before it can be used again." },
@@ -7165,10 +7163,9 @@ function startBoard() {
   }
 
   /* Special perks: only picked, after a kill or a medal, by a piece with 3 kills or 9 medals. */
-  const specialOpen = (piece, tier = 2) => (piece.record ? piece.record.kills : 0) >= (tier === 3 ? TIER3_KILLS : SPECIAL_KILLS)
-    || piece.medals >= (tier === 3 ? TIER3_MEDALS : SPECIAL_MEDALS);
+  const specialOpen = (piece) => (piece.record ? piece.record.kills : 0) >= SPECIAL_KILLS || piece.medals >= SPECIAL_MEDALS;
   const ownPerks = (piece) => piece.perks.filter((id) => !(piece.arenaLent || []).includes(id));
-  const perkPool = (piece, earned = true) => PERKS.filter((perk) => (!hasPerk(piece, perk.id) || (piece.arenaLent || []).includes(perk.id)) && (!perk.special || (earned && specialOpen(piece, perk.tier || 2))));
+  const perkPool = (piece, earned = true) => PERKS.filter((perk) => (!hasPerk(piece, perk.id) || (piece.arenaLent || []).includes(perk.id)) && (!perk.special || (earned && specialOpen(piece))));
   function awardPerk(piece, reason = "kill") {
     if (reason === "kill" && piece.record) {
       piece.record.kills++;
@@ -7304,8 +7301,8 @@ function startBoard() {
       const lists = [];
       const kills = piece.record ? piece.record.kills : 0;
       const groups = [
-        { name: "Special perks", text: `Tier 2 for a piece with ${SPECIAL_KILLS} kills or ${SPECIAL_MEDALS} medals of valor, tier 3 with ${TIER3_KILLS} kills or ${TIER3_MEDALS} medals.`, options: fresh.filter((perk) => perk.special),
-          locked: PERKS.some((perk) => perk.special && !hasPerk(piece, perk.id) && !specialOpen(piece, perk.tier || 2)) && !fresh.some((perk) => perk.special) },
+        { name: "Special perks", text: `For a piece with ${SPECIAL_KILLS} kills or ${SPECIAL_MEDALS} medals of valor.`, options: fresh.filter((perk) => perk.special),
+          locked: !specialOpen(piece) && PERKS.some((perk) => perk.special && !hasPerk(piece, perk.id)) },
         ...PERK_TYPES.map((type) => ({ ...type, options: fresh.filter((perk) => perk.type === type.id && !perk.special) })),
       ];
       for (const type of groups) {
