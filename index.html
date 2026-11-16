@@ -553,7 +553,7 @@ button.primary:hover:not(:disabled) { background: var(--brass); color: var(--ink
 
     <section class="group">
       <span class="label">The ice</span>
-      <p class="note">After turn 7 a random rock turns to ice. Every turn after that the ice spreads: by default 22 mm a turn while it covers under half the globe, 18 mm up to 80%, then 14 mm (set with the Ice spread sliders). Any piece it reaches, or that moves onto it, takes 35 damage, once a turn, and freezes if that leaves it at 0. The pale band shows where it will reach next. In the end it covers the whole sphere.</p>
+      <p class="note">After turn 7 a random rock turns to ice. Every turn after that the ice spreads: by default 22 mm a turn while it covers under half the globe, 18 mm up to 80%, then 14 mm (set with the Ice spread sliders). A piece still on the ice when the turn ends, once the ice has spread, takes 35 damage and freezes if that leaves it at 0. Crossing the ice during the turn costs nothing. The pale band shows where it will reach next. In the end it covers the whole sphere.</p>
     </section>
 
     <section class="group">
@@ -1080,7 +1080,7 @@ const TUMBLE_MM = 50;                /* how far a kicked ball rolls */
 const TUMBLE_SPEED_MM = 20;          /* per second */
 const TUMBLE_DAMAGE = 20;
 const TUMBLE_KNOCK_MM = 20;
-const ICE_DAMAGE = 35;               /* per turn, for a piece touching the ice */
+const ICE_DAMAGE = 35;               /* for a piece on the ice when the turn ends */
 const ICE_COLD_DAMAGE = 25;          /* the same, with Ice Cold */
 const HEALING_PER_TURN = 2;
 const GHOST_MM = 50;                 /* how far a Post Mortem Nen ghost drifts */
@@ -6292,7 +6292,9 @@ function startBoard() {
       frostPlants();
     }
     if (puddles.length) freezePuddles();
-    freezeCaught();
+    for (const mushroom of mushrooms) {
+      if (!mushroom.gone && (iceDistance(mushroom.up) <= ice.reach || puddleIce(mushroom.up) <= 0)) dropMushroom(mushroom);
+    }
   }
 
   /* How much of the globe the ice covers, as a share: spots spread evenly over the
@@ -6351,9 +6353,12 @@ function startBoard() {
     return [-reach, reach].some((along) => icy(piece.up.clone().addScaledVector(piece.forward, along).normalize()));
   }
 
-  /* Closest to the ice goes first, and the ice halts once one side is left, so whoever
-     holds out longest wins instead of everyone freezing in the same turn. */
+  /* At the end of the turn, once the ice has spread: every piece still on it. Closest to
+     the ice goes first, and the ice halts once one side is left, so whoever holds out
+     longest wins instead of everyone freezing in the same turn. True if an igloo has
+     started rolling off, so the turn waits for it. */
   function freezeCaught() {
+    let rolling = false;
     const caught = pieces.filter((p) => !p.digging && onIce(p)).sort((a, b) => iceDistance(a.up) - iceDistance(b.up));
     for (const piece of caught) {
       if (piece.decoy) {
@@ -6369,10 +6374,11 @@ function startBoard() {
       if (piece.iglooTurn === turnState.number) continue;
       if (balled(piece) && perkOn(piece, "igloo") && perkReady(piece, "igloo")) {
         rollOffIce(piece);
+        rolling = rolling || !!piece.igloo;
         continue;
       }
-      /* The ice costs 35 HP (25 with Ice Cold) the first time each turn a piece touches
-         it, and freezes it only if that leaves it at 0. */
+      /* The ice costs 35 HP (25 with Ice Cold) once a turn, and freezes the piece only if
+         that leaves it at 0. */
       if (piece.iceTurn === turnState.number) continue;
       piece.iceTurn = turnState.number;
       const bite = hasPerk(piece, "icecold") ? ICE_COLD_DAMAGE : ICE_DAMAGE;
@@ -6385,9 +6391,7 @@ function startBoard() {
       }
       freeze(piece);
     }
-    for (const mushroom of mushrooms) {
-      if (!mushroom.gone && (iceDistance(mushroom.up) <= ice.reach || puddleIce(mushroom.up) <= 0)) dropMushroom(mushroom);
-    }
+    return rolling;
   }
 
   /* The shortest way off the ice. The ice is still spreading when it catches the ball,
@@ -7772,7 +7776,10 @@ function startBoard() {
       sound.ice((ice.goal - ice.reach) / ICE_SPEED_MM / playSpeed);
       return;
     }
-    if (!ice.rock || ice.reach >= ice.goal) finishTurn();
+    if (ice.rock && ice.reach < ice.goal) return;
+    /* The ice bites only now, at the end of the turn. An igloo rolling off holds the turn. */
+    if (ice.rock && freezeCaught()) return;
+    finishTurn();
   }
 
   function stepCurls(seconds) {
