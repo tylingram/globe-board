@@ -1001,6 +1001,8 @@ const TRADE_RANGE_MM = 100;          /* Trading Spaces: how far away the other p
 const DASH_DAMAGE = 10;              /* Lightning Dash: to an enemy touching the beam */
 const DASH_KNOCK_MM = 10;
 const DASH_HOLD_SECONDS = 0.8;       /* the turn waits at least this long, so the beam is seen */
+const TECTONIC_RADIUS_MM = 50;       /* Tectonic Shift: the turntable round the ball */
+const TECTONIC_SECONDS = 2;          /* half a turn in this time */
 const PUNCH_RANGE_MM = 100;          /* One Punch: how far the blade of light reaches */
 const PUNCH_ANGLE_DEG = 7;           /* its whole width, as an angle at the piece */
 const PUNCH_CORE_MM = 1;             /* this close to its middle line: the full blow */
@@ -1110,6 +1112,7 @@ const PERKS = [
   { id: "emp", type: "ball", cools: 2, name: "EMP", text: "Switch on, then roll into a ball: sends out a shock wave 50 mm around the piece. Every other piece it catches that isn't a ball, yours too, can't fire its cannon or switch on perks next turn. Always-on perks still work. Then it needs 2 turns before it can be used again." },
   { id: "punch", type: "fire", special: true, cools: 2, name: "One Punch", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then aim inside the red circle. Instead of a shell, the piece throws a blade of white light 100 mm long and 7\u00b0 wide, like the flame's slice. Anything within 1 mm of its middle line takes 50 damage; anything else it touches takes 45 and is thrown 30 mm back. A ball takes no damage, but is pushed 20 mm. Rail road, barbed wire, rock, cliffs, plants, webs, puddles and mushrooms in the slice are erased, and the ground there is cut down to 5 mm below the base line. Then it needs 2 turns before it can be used again." },
   { id: "divine", type: "fire", special: true, cools: 2, name: "Divine Destruction", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. The cannon fires as usual, and leaves a glowing circle where the shell lands and another straight through the globe from there. Next turn, 2 seconds in, a white laser drives through both circles and the whole globe between. The laser is as wide as the shell's whole damage area (40 mm across for a plain shell, wider with Big shell, narrower with Armor Piercing). Every piece in it, balls and diggers too, is erased, and it leaves a hole that wide that nothing can cross, not even by tunneling. Then it needs 2 turns before it can be used again." },
+  { id: "tectonic", type: "ball", special: true, cools: 2, name: "Tectonic Shift", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: the ground 50 mm round it becomes a turntable and turns half way round over 2 seconds as the turn plays. Every piece on it, from any side, is carried round, and its orders turn with it: a move or a shot goes the same distance and direction from the piece as it was ordered, so it ends up somewhere else on the map. A piece that drives off stops turning; one that drives on starts. Rock doesn't turn, and stops a piece being carried into it. The ice spreads as usual. Then it needs 2 turns before it can be used again." },
   { id: "arena", type: "ball", special: true, cools: 2, name: "Tournament Arc", text: "Special perk, only for a piece with 3 kills or 9 medals of valor. Switch on, then roll into a ball: a ring of cliff 5 mm wide rises 60 mm out from the piece, and stays for the rest of the game. Anything standing where it rises is pushed off it, unhurt. From next turn on, this piece and any teammates inside the ring have Melee, Tunneling and Double Move, with no wait between uses. A piece that didn't have them loses them again once it's outside the ring. Then it needs 2 turns before it can be used again." },
   { id: "earthbend", type: "ball", name: "Earth bending", text: "Switch on, then roll into a ball: the ground under the piece rises 10 mm (to at most 15 mm), sloping away 1 mm in 5." },
 ];
@@ -2965,6 +2968,7 @@ function startBoard() {
   const dashes = [];           /* Lightning Dash beams, until the end of the turn */
   const punches = [];          /* One Punch slices, for the rest of the game: { origin, ahead, side } */
   const punchFx = [];          /* the blades of light while they shine */
+  const shifts = [];           /* Tectonic Shift turntables, while they turn */
   let selected = null;
   let moving = false;
   let orderLeg = "first";      /* which order the next click sets: "first", "second" or "decoy" */
@@ -4669,6 +4673,9 @@ function startBoard() {
     }
     if (hasPerk(piece, "emp") && perkReady(piece, "emp") && empWorth(piece)) piece.perksOn.add("emp");
     if (hasPerk(piece, "arena") && perkReady(piece, "arena") && Math.random() < 0.4) piece.perksOn.add("arena");
+    /* Tectonic Shift, with an enemy on the turntable to throw off its aim */
+    if (hasPerk(piece, "tectonic") && perkReady(piece, "tectonic") && Math.random() < 0.5
+      && pieces.some((p) => p.team !== piece.team && !p.decoy && mmBetween(p.up, piece.up) <= TECTONIC_RADIUS_MM)) piece.perksOn.add("tectonic");
   }
   /* An EMP is worth it when it would catch more enemies than teammates. */
   function empWorth(piece) {
@@ -5583,9 +5590,10 @@ function startBoard() {
         if (perkOn(piece, "selfdestruct")) piece.boom = { time: 0, glow: null };
         if (perkOn(piece, "emp") && perkReady(piece, "emp") && !piece.decoy) piece.emp = { time: 0 };
         if (perkOn(piece, "arena") && perkReady(piece, "arena") && !piece.decoy) piece.arenaRise = { time: 0 };
+        if (perkOn(piece, "tectonic") && perkReady(piece, "tectonic") && !piece.decoy) startShift(piece);
       }
     }
-    moving = movers.length + gunners.length > 0 || pieces.some((p) => p.curl !== p.curlGoal) || !!ice.rock || beams.some((b) => b.stage === "charge");
+    moving = movers.length + gunners.length > 0 || pieces.some((p) => p.curl !== p.curlGoal) || !!ice.rock || beams.some((b) => b.stage === "charge") || shifts.length > 0;
     for (const piece of [...movers, ...gunners]) drawArrow(piece);
     if (moving) say("Orders are playing out.");
     else finishTurn();
@@ -7625,6 +7633,7 @@ function startBoard() {
   function stepMovers(seconds) {
     const slices = Math.max(1, Math.ceil(seconds / CONTACT_CHECK_SECONDS));
     stepCurls(seconds);
+    if (shifts.length) stepShifts(seconds);
     for (let i = 0; i < slices; i++) advanceMovers(seconds / slices);
     stepShots(seconds);
     stepBooms(seconds);
@@ -7642,7 +7651,7 @@ function startBoard() {
     if (wires.length) snagOnWire();
     for (const dash of dashes) dash.age += seconds;
     if (dashes.length) zapDashes();
-    const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.emp || p.arenaRise || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS) || beams.some((b) => b.stage !== "marked") || dashes.some((d) => d.age < DASH_HOLD_SECONDS) || punchFx.length > 0;
+    const busy = flames.some((f) => f.age < FLAME_HOLD_SECONDS) || pieces.some((p) => p.move || p.ride || p.igloo || p.shot || p.shove || p.tumble || p.strikeAt || p.boom || p.emp || p.arenaRise || p.curl !== p.curlGoal) || webs.some((w) => w.age < WEB_HOLD_SECONDS) || beams.some((b) => b.stage !== "marked") || dashes.some((d) => d.age < DASH_HOLD_SECONDS) || punchFx.length > 0 || shifts.length > 0;
     if (busy || shells.length || blasts.length || squishes.length || ghosts.length || terrain.bends.some((bend) => bend.grow < 1)) return;
     /* Once everything else is done, the ice spreads, unless the game is already won. */
     if (ice.rock && !ice.spread && sidesLeft() > 1) {
@@ -8130,6 +8139,111 @@ function startBoard() {
       button.append(title, about);
       perkList.appendChild(button);
     }
+  }
+
+  /* ---------- Tectonic Shift ---------- */
+  /* The ground 50 mm round the ball turns half way round, like a turntable. Pieces on it
+     are carried round, and their orders turn with them. */
+  const shiftPaint = new THREE.MeshBasicMaterial({ color: linear("#ffcf6e"), transparent: true, opacity: 0.85, depthWrite: false, side: THREE.DoubleSide });
+  const shiftFill = new THREE.MeshBasicMaterial({ color: linear("#ffcf6e"), transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide });
+  function startShift(piece) {
+    usePerk(piece, "tectonic");
+    const r = radiusMm();
+    const shift = { up: piece.up.clone().normalize(), age: 0, turned: 0, spokes: null };
+    shift.meshes = [
+      new THREE.Mesh(capGeometry(shift.up, (TECTONIC_RADIUS_MM - 1.2) / r, TECTONIC_RADIUS_MM / r, 4), shiftPaint),
+      new THREE.Mesh(capGeometry(shift.up, 0, (TECTONIC_RADIUS_MM - 1.2) / r), shiftFill),
+    ];
+    globe.add(...shift.meshes);
+    shifts.push(shift);
+    drawSpokes(shift);
+    floatLabel(piece, "Tectonic Shift", "hit heal");
+    sound.explosion(0.6, false);
+  }
+  /* Six spokes that turn with it, drawn on the ground as it is under them. */
+  function drawSpokes(shift) {
+    if (shift.spokes) {
+      globe.remove(shift.spokes);
+      shift.spokes.geometry.dispose();
+    }
+    const r = radiusMm();
+    const start = tangentPair(shift.up)[0];
+    const positions = [];
+    const index = [];
+    const SPOKES = 6, STEPS = 20, HALF_MM = 0.7;
+    for (let k = 0; k < SPOKES; k++) {
+      const dir = start.clone().applyAxisAngle(shift.up, shift.turned + (k / SPOKES) * Math.PI * 2);
+      const axis = new THREE.Vector3().crossVectors(shift.up, dir).normalize();
+      const base = positions.length / 3;
+      for (let j = 0; j <= STEPS; j++) {
+        const mid = shift.up.clone().applyAxisAngle(axis, (4 + ((TECTONIC_RADIUS_MM - 5) * j) / STEPS) / r);
+        for (const side of [-1, 1]) {
+          const point = onGround(mid.clone().addScaledVector(axis, (side * HALF_MM) / r).normalize(), 1 + 0.6 / r);
+          positions.push(point.x, point.y, point.z);
+        }
+        if (j) {
+          const b = base + (j - 1) * 2;
+          index.push(b, b + 1, b + 2, b + 1, b + 3, b + 2);
+        }
+      }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setIndex(index);
+    shift.spokes = new THREE.Mesh(geometry, shiftPaint);
+    globe.add(shift.spokes);
+    needsDraw = true;
+  }
+  function stepShifts(seconds) {
+    for (const shift of [...shifts]) {
+      shift.age += seconds;
+      const t = Math.min(1, shift.age / TECTONIC_SECONDS);
+      const goal = Math.PI * t * t * (3 - 2 * t);   /* eases in and out */
+      const step = goal - shift.turned;
+      shift.turned = goal;
+      if (step > 0) turnTable(shift, step);
+      drawSpokes(shift);
+      if (shift.age >= TECTONIC_SECONDS + 0.3) removeShift(shift);
+    }
+  }
+  /* Carries round every piece on the turntable just now, with its orders. A piece riding
+     the railroad stays on the track, and an igloo stays frozen. */
+  function turnTable(shift, angle) {
+    const q = new THREE.Quaternion().setFromAxisAngle(shift.up, angle);
+    const turn = (v) => v.clone().applyQuaternion(q).normalize();
+    for (const piece of pieces) {
+      if (piece.ride || piece.igloo || mmBetween(piece.up, shift.up) > TECTONIC_RADIUS_MM) continue;
+      const up = turn(piece.up);
+      const forward = piece.forward.clone().applyQuaternion(q);
+      forward.addScaledVector(up, -forward.dot(up)).normalize();
+      if (!piece.digging) {
+        const gap = rockGap({ up, forward, curl: piece.curl, size: piece.size });
+        if (gap < 0 && gap < rockGap(piece)) continue;   /* jammed against rock: the ground slides under it */
+      }
+      piece.up = up;
+      piece.forward = forward;
+      for (const key of ["plan", "plan2", "decoyPlan", "fire", "fire2", "flameAt"]) if (piece[key]) piece[key] = turn(piece[key]);
+      for (const pose of new Set([piece.moveStart, piece.lastClear])) {
+        if (!pose) continue;
+        pose.up = turn(pose.up);
+        pose.forward = pose.forward.clone().applyQuaternion(q);
+      }
+      if (piece.shove) piece.shove.axis = piece.shove.axis.clone().applyQuaternion(q);
+      poseOnSphere(piece);
+      drawArrow(piece);
+    }
+  }
+  function removeShift(shift) {
+    for (const mesh of [...shift.meshes, shift.spokes]) {
+      if (!mesh) continue;
+      globe.remove(mesh);
+      mesh.geometry.dispose();
+    }
+    shifts.splice(shifts.indexOf(shift), 1);
+    needsDraw = true;
+  }
+  function clearShifts() {
+    while (shifts.length) removeShift(shifts[0]);
   }
 
   /* ---------- One Punch ---------- */
@@ -9484,6 +9598,7 @@ function startBoard() {
     clearHoles();
     clearDashes();
     clearPunches();
+    clearShifts();
     arenas.length = 0;
     news.textContent = "";
     for (const splat of splats.splice(0)) {
